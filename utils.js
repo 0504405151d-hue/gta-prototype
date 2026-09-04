@@ -67,29 +67,27 @@ export function buildFacadeTexture(THREE, { w = 128, h = 256, base = '#2b2f3a', 
   return tex;
 }
 
-// Simple asphalt texture with a lane-marking stripe baked in the middle.
-export function buildRoadTexture(THREE, { w = 128, h = 512 } = {}) {
+// Plain asphalt texture — deliberately DIRECTION-FREE (isotropic speckle,
+// nothing baked in that points one way). This single texture tiles across
+// the whole ground plane under both the north-south and east-west streets
+// of the grid, so it must look right no matter which way a given street
+// runs. (An earlier version baked a dashed center line into this texture —
+// that line was only ever correctly oriented for streets running one way;
+// every cross-street showed it running across the road instead of along
+// it. Lane markings are now separate, correctly-oriented 3D dash meshes —
+// see addLaneMarkings() in city.js — laid down per street direction.)
+export function buildRoadTexture(THREE, { w = 128, h = 128 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#2a2c31';
   ctx.fillRect(0, 0, w, h);
-  // subtle asphalt speckle + a few soft tire-wear streaks down the lane
-  for (let i = 0; i < 3600; i++) {
+  // subtle asphalt speckle, scattered with no directional bias
+  for (let i = 0; i < 2000; i++) {
     ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.15})`;
-    ctx.fillRect(Math.random() * w, Math.random() * h, w / 32, w / 32);
-  }
-  ctx.fillStyle = 'rgba(0,0,0,0.10)';
-  ctx.fillRect(w * 0.22, 0, w * 0.1, h);
-  ctx.fillRect(w * 0.68, 0, w * 0.1, h);
-  // dashed center line (measured as a fraction of width so it stays the same
-  // relative thickness regardless of texture resolution)
-  ctx.fillStyle = '#e8c94a';
-  const dashH = h * 0.12;
-  const lineW = w * 0.06;
-  for (let y = 0; y < h; y += dashH * 2) {
-    ctx.fillRect(w / 2 - lineW / 2, y, lineW, dashH);
+    const s = w / 32;
+    ctx.fillRect(Math.random() * w, Math.random() * h, s, s);
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;

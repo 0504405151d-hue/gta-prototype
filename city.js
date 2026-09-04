@@ -226,14 +226,24 @@ export function buildCity(THREE, CANNON, world, scene) {
   }
 
   // ---------- Streetlights at intersections ----------
+  const streetCoords = [];
+  for (let i = 0; i <= GRID_N; i++) streetCoords.push((i - half - 0.5) * BLOCK_PITCH);
+
   for (let i = 0; i <= GRID_N; i++) {
     for (let j = 0; j <= GRID_N; j++) {
       if ((i + j) % 2 !== 0) continue; // sparse, for perf
-      const x = (i - half - 0.5) * BLOCK_PITCH;
-      const z = (j - half - 0.5) * BLOCK_PITCH;
+      const x = streetCoords[i];
+      const z = streetCoords[j];
       addStreetlight(THREE, group, x, z);
     }
   }
+
+  // ---------- Lane markings: correctly oriented per street direction ----------
+  // A single shared road texture can't get this right for BOTH directions of
+  // a grid at once (see the note in buildRoadTexture) — so dashes are real,
+  // separately-oriented geometry instead: one batch elongated along Z for the
+  // streets running north-south, one elongated along X for east-west streets.
+  addLaneMarkings(THREE, group, streetCoords, GROUND_SEAM_GAP);
 
   // ---------- Spawn points (center plaza roads) ----------
   for (let k = 0; k < 8; k++) {
@@ -325,6 +335,50 @@ function addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz) {
   parkedBody.quaternion.setFromEuler(0, heading, 0);
   parkedBody.userData = { isBuilding: true }; // solid + dents the player's car like any other structure
   world.addBody(parkedBody);
+}
+
+function addLaneMarkings(THREE, group, streetCoords, groundSeamGap) {
+  const dashLen = 1.6, dashGap = 1.6, dashW = 0.22;
+  const y = groundSeamGap + 0.015; // just above the (slightly lowered) road surface, well below curb height
+  const range = (GRID_N * BLOCK_PITCH) / 2 + 30; // matches groundSize/2, covers the outer perimeter streets too
+  const step = dashLen + dashGap;
+  const clearance = ROAD_HALF_WIDTH + 1.5; // keep dashes out of intersections
+
+  const mat = new THREE.MeshStandardMaterial({ color: 0xe8c94a, roughness: 0.55, metalness: 0.04 });
+  const geoNS = new THREE.BoxGeometry(dashW, 0.02, dashLen); // dash elongated along Z — for north/south streets
+  const geoEW = new THREE.BoxGeometry(dashLen, 0.02, dashW); // dash elongated along X — for east/west streets
+
+  const perStreet = Math.ceil((range * 2) / step) + 2;
+  const maxCount = streetCoords.length * perStreet;
+  const instNS = new THREE.InstancedMesh(geoNS, mat, maxCount);
+  const instEW = new THREE.InstancedMesh(geoEW, mat, maxCount);
+  instNS.receiveShadow = true;
+  instEW.receiveShadow = true;
+
+  const m = new THREE.Matrix4();
+  let countNS = 0;
+  for (const x of streetCoords) {
+    for (let z = -range; z <= range; z += step) {
+      if (streetCoords.some((zc) => Math.abs(z - zc) < clearance)) continue;
+      m.makeTranslation(x, y, z);
+      instNS.setMatrixAt(countNS++, m);
+    }
+  }
+  instNS.count = countNS;
+  instNS.instanceMatrix.needsUpdate = true;
+
+  let countEW = 0;
+  for (const z of streetCoords) {
+    for (let x = -range; x <= range; x += step) {
+      if (streetCoords.some((xc) => Math.abs(x - xc) < clearance)) continue;
+      m.makeTranslation(x, y, z);
+      instEW.setMatrixAt(countEW++, m);
+    }
+  }
+  instEW.count = countEW;
+  instEW.instanceMatrix.needsUpdate = true;
+
+  group.add(instNS, instEW);
 }
 
 function addStreetlight(THREE, group, x, z) {

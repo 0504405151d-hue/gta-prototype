@@ -140,10 +140,48 @@ export class Vehicle {
     this._dentBase = Float32Array.from(baseGeo.attributes.position.array);
     this._dentAccum = new Float32Array(baseGeo.attributes.position.count);
 
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.82, 0.5, chassisL * 0.5), glassMat);
-    cabin.position.set(0, 0.4 + chassisH * 0.55 / 2 + 0.25, -0.15);
-    cabin.castShadow = true;
-    group.add(cabin);
+    // Greenhouse built from angled panels (hood, raked windshield, roof,
+    // raked rear window, trunk lid) instead of one flat box sitting on the
+    // body — this is what actually reads as "a real car silhouette" rather
+    // than a shoebox with a smaller shoebox on top. All angles are plain
+    // rotated boxes, chosen to visually match a small sedan/hatchback
+    // profile; the dentable `base` mesh above is untouched by any of this.
+    const bodyTopY = 0.4 + (chassisH * 0.55) / 2; // ≈ top surface of the base slab
+
+    const hoodLen = chassisL * 0.26;
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.92, 0.07, hoodLen), bodyMat);
+    hood.position.set(0, bodyTopY + 0.05, chassisL / 2 - hoodLen / 2 - 0.2);
+    hood.rotation.x = -0.14; // dips toward the front bumper
+    hood.castShadow = true;
+    group.add(hood);
+
+    const windshieldLen = chassisL * 0.17;
+    const windshieldZ = chassisL / 2 - hoodLen - 0.2 - windshieldLen * 0.32;
+    const windshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, windshieldLen), glassMat);
+    windshield.position.set(0, bodyTopY + 0.24, windshieldZ);
+    windshield.rotation.x = 0.62; // raked
+    group.add(windshield);
+
+    const roofLen = chassisL * 0.3;
+    const roofZ = windshieldZ - windshieldLen * 0.5 - roofLen / 2 + 0.05;
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.76, 0.4, roofLen), bodyMat);
+    roof.position.set(0, bodyTopY + 0.42, roofZ);
+    roof.castShadow = true;
+    group.add(roof);
+
+    const rearWindshieldLen = chassisL * 0.15;
+    const rearWindshieldZ = roofZ - roofLen / 2 - rearWindshieldLen * 0.32;
+    const rearWindshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, rearWindshieldLen), glassMat);
+    rearWindshield.position.set(0, bodyTopY + 0.22, rearWindshieldZ);
+    rearWindshield.rotation.x = -0.58;
+    group.add(rearWindshield);
+
+    const trunkLen = chassisL * 0.16;
+    const trunk = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.92, 0.07, trunkLen), bodyMat);
+    trunk.position.set(0, bodyTopY + 0.05, rearWindshieldZ - rearWindshieldLen * 0.5 - trunkLen / 2 + 0.05);
+    trunk.rotation.x = 0.12;
+    trunk.castShadow = true;
+    group.add(trunk);
 
     // Bumper strips — bottom-front/rear accents that break up the slab body
     // and read as a distinct plastic bumper rather than one flat painted box.
@@ -190,8 +228,14 @@ export class Vehicle {
       hl.position.set(x, 0.45, chassisL / 2 - 0.05);
       group.add(hl);
     });
-    const headBeam = new THREE.SpotLight(0xfff2c0, 12, 40, Math.PI / 6, 0.4, 1.2);
-    headBeam.position.set(0, 0.6, chassisL / 2);
+    // Sits just past the front bumper (not at bumper height where the new
+    // sloped hood now passes close underneath) and at a lower intensity —
+    // with the old flat-box hood this was far enough from any other body
+    // panel to not matter, but the raked hood introduced above put a large
+    // surface ~20cm from this light, which at the old intensity of 12
+    // blew the whole front of the car out to solid white under bloom.
+    const headBeam = new THREE.SpotLight(0xfff2c0, 5, 40, Math.PI / 6, 0.4, 1.4);
+    headBeam.position.set(0, 0.45, chassisL / 2 + 0.15);
     headBeam.target.position.set(0, 0, chassisL / 2 + 10);
     group.add(headBeam, headBeam.target);
 
@@ -220,7 +264,15 @@ export class Vehicle {
       const hub = new THREE.Mesh(new THREE.CylinderGeometry(WHEEL_RADIUS * 0.14, WHEEL_RADIUS * 0.14, 0.36, 10), rimMat);
       hub.rotation.z = Math.PI / 2;
       wheelGroup.add(hub);
-      group.add(wheelGroup);
+      // IMPORTANT: added to the SCENE, not to `group`. cannon-es's
+      // wheelInfo.worldTransform is already a WORLD-space transform; `group`
+      // is itself moved/rotated to the chassis's world transform every
+      // frame below, so parenting a wheel under it and then assigning that
+      // same world transform to the child's LOCAL position/quaternion would
+      // apply the chassis transform twice. That compounding is exactly what
+      // was sending the wheels drifting away from the car (worse the
+      // farther the car got from the world origin, and worse on turns).
+      scene.add(wheelGroup);
       this.wheelMeshes.push(wheelGroup);
     }
 
@@ -426,6 +478,16 @@ export class RemoteCar {
     );
     cabin.position.set(0, 0.65, -0.15);
     group.add(cabin);
+    // Static wheels (no per-wheel telemetry travels over the network for
+    // remote players, so these don't spin/steer) — still much better than a
+    // body floating with no wheels at all.
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.92 });
+    [[-0.95, 0.35, 1.4], [0.95, 0.35, 1.4], [-0.95, 0.35, -1.4], [0.95, 0.35, -1.4]].forEach(([wx, wy, wz]) => {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14), wheelMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(wx, wy, wz);
+      group.add(wheel);
+    });
     scene.add(group);
     this.group = group;
 
