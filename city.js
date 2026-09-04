@@ -7,6 +7,8 @@ import { rand, randInt, choice, resetSeed, buildFacadeTexture, buildRoadTexture,
 const GRID_N = 7;            // city is GRID_N x GRID_N blocks
 const BLOCK_PITCH = 34;      // distance between block centers
 const ROAD_HALF_WIDTH = 5.5; // half width of the road strip between blocks
+const GROUND_SEAM_GAP = 0.02; // keeps the road plane from z-fighting with sidewalks/buildings
+const CURB_HEIGHT = 0.18;    // sidewalk slab height — also its real physics curb now
 export const CITY_HALF = (GRID_N * BLOCK_PITCH) / 2;
 
 export function buildCity(THREE, CANNON, world, scene) {
@@ -105,6 +107,10 @@ export function buildCity(THREE, CANNON, world, scene) {
   const groundMat = new THREE.MeshStandardMaterial({ map: roadTex, roughness: 0.95, metalness: 0.02 });
   const ground = new THREE.Mesh(groundGeo, groundMat);
   ground.rotation.x = -Math.PI / 2;
+  // Sits a hair below y=0 (where sidewalk/building bases live) so its top
+  // face is never exactly coplanar with theirs — coincident surfaces were
+  // z-fighting (flickering) along every sidewalk and building edge.
+  ground.position.y = -GROUND_SEAM_GAP;
   ground.receiveShadow = true;
   group.add(ground);
 
@@ -117,7 +123,7 @@ export function buildCity(THREE, CANNON, world, scene) {
     shape: new CANNON.Box(new CANNON.Vec3(groundSize / 2, groundThickness / 2, groundSize / 2)),
     material: new CANNON.Material('ground'),
   });
-  groundBody.position.set(0, -groundThickness / 2, 0);
+  groundBody.position.set(0, -groundThickness / 2 - GROUND_SEAM_GAP, 0);
   world.addBody(groundBody);
 
   // ---------- Sidewalks + buildings per block ----------
@@ -137,12 +143,23 @@ export function buildCity(THREE, CANNON, world, scene) {
       // and a dedicated spot for destructible props.
       const makeOpen = isCenter || rand(0, 1) < 0.12;
 
-      // Sidewalk slab (visual + very low curb collider)
+      // Sidewalk slab: visual + a REAL curb collider (this used to be
+      // visual-only, so cars just glided straight through/over it with no
+      // bump — the wheel raycasts now see an actual low step here, so
+      // driving onto a sidewalk feels like mounting a curb instead of
+      // clipping through a floating box).
       const sidewalkMat = new THREE.MeshStandardMaterial({ map: sidewalkTex, roughness: 1 });
-      const sidewalk = new THREE.Mesh(new THREE.BoxGeometry(footprint, 0.18, footprint), sidewalkMat);
-      sidewalk.position.set(cx, 0.09, cz);
+      const sidewalk = new THREE.Mesh(new THREE.BoxGeometry(footprint, CURB_HEIGHT, footprint), sidewalkMat);
+      sidewalk.position.set(cx, CURB_HEIGHT / 2, cz);
       sidewalk.receiveShadow = true;
       group.add(sidewalk);
+
+      const curbBody = new CANNON.Body({
+        mass: 0,
+        shape: new CANNON.Box(new CANNON.Vec3(footprint / 2, CURB_HEIGHT / 2, footprint / 2)),
+      });
+      curbBody.position.set(cx, CURB_HEIGHT / 2, cz);
+      world.addBody(curbBody);
 
       if (makeOpen) {
         openBlocks.add(`${i},${j}`);
@@ -177,6 +194,13 @@ export function buildCity(THREE, CANNON, world, scene) {
       world.addBody(body);
       buildingBodies.push(body);
       footprints.push({ x: cx, z: cz, w: bw, d: bd });
+
+      // A parked car (or two) tucked into the sidewalk margin along a
+      // building edge — cheap "lived-in city" detail, and a solid obstacle
+      // players can actually crash into (dents the body just like a wall).
+      if (rand(0, 1) < 0.55) {
+        addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz);
+      }
 
       // rooftop clutter — AC units + the occasional antenna, purely visual,
       // just enough to break up the flat roofline silhouette
@@ -248,6 +272,59 @@ function addTree(THREE, group, x, z) {
   canopy.position.set(x, trunkH + canopyR * 0.7, z);
   canopy.castShadow = true;
   group.add(canopy);
+}
+
+const PARKED_CAR_COLORS = [0x8a1c1c, 0x1c3d8a, 0x2e2e33, 0xd8d8d0, 0x1c6b3d, 0x8a6a1c];
+
+function addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz) {
+  const margin = (footprint - Math.min(bw, bd)) / 2;
+  if (margin < 1.4) return; // not enough room next to this building — skip rather than clip into it
+
+  const side = randInt(0, 3); // 0:+x 1:-x 2:+z 3:-z edge of the block
+  const inset = Math.max(0.9, margin * 0.5);
+  const alongHalf = (side < 2 ? bd : bw) / 2 - 3;
+  if (alongHalf < 1) return;
+  const along = rand(-alongHalf, alongHalf);
+
+  let x, z, heading;
+  if (side === 0) { x = cx + bw / 2 + inset; z = cz + along; heading = Math.PI / 2; }
+  else if (side === 1) { x = cx - bw / 2 - inset; z = cz + along; heading = -Math.PI / 2; }
+  else if (side === 2) { x = cx + along; z = cz + bd / 2 + inset; heading = 0; }
+  else { x = cx + along; z = cz - bd / 2 - inset; heading = Math.PI; }
+
+  const w = 1.9, h = 1.35, l = 4.2;
+  const color = choice(PARKED_CAR_COLORS);
+  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.32, metalness: 0.7, clearcoat: 1, clearcoatRoughness: 0.15 });
+  const car = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.5, l), bodyMat);
+  base.position.y = h * 0.32;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  car.add(base);
+  const cabin = new THREE.Mesh(
+    new THREE.BoxGeometry(w * 0.8, h * 0.42, l * 0.48),
+    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.08, metalness: 0.15, clearcoat: 0.5 })
+  );
+  cabin.position.set(0, h * 0.68, -l * 0.05);
+  cabin.castShadow = true;
+  car.add(cabin);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
+  [[-w / 2, l / 2 - 0.7], [w / 2, l / 2 - 0.7], [-w / 2, -l / 2 + 0.6], [w / 2, -l / 2 + 0.6]].forEach(([wx, wz]) => {
+    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.28, 14), wheelMat);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(wx, 0.34, wz);
+    car.add(wheel);
+  });
+  car.position.set(x, 0, z);
+  car.rotation.y = heading;
+  group.add(car);
+
+  const shape = new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, l / 2));
+  const parkedBody = new CANNON.Body({ mass: 0, shape });
+  parkedBody.position.set(x, h / 2, z);
+  parkedBody.quaternion.setFromEuler(0, heading, 0);
+  parkedBody.userData = { isBuilding: true }; // solid + dents the player's car like any other structure
+  world.addBody(parkedBody);
 }
 
 function addStreetlight(THREE, group, x, z) {

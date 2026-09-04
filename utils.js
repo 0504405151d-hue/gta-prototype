@@ -63,32 +63,39 @@ export function buildFacadeTexture(THREE, { w = 128, h = 256, base = '#2b2f3a', 
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8; // keeps facades from turning into a mushy blur at grazing/distant view angles
   return tex;
 }
 
 // Simple asphalt texture with a lane-marking stripe baked in the middle.
-export function buildRoadTexture(THREE, { w = 64, h = 256 } = {}) {
+export function buildRoadTexture(THREE, { w = 128, h = 512 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#2a2c31';
   ctx.fillRect(0, 0, w, h);
-  // subtle noise
-  for (let i = 0; i < 900; i++) {
+  // subtle asphalt speckle + a few soft tire-wear streaks down the lane
+  for (let i = 0; i < 3600; i++) {
     ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.15})`;
-    ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    ctx.fillRect(Math.random() * w, Math.random() * h, w / 32, w / 32);
   }
-  // dashed center line
+  ctx.fillStyle = 'rgba(0,0,0,0.10)';
+  ctx.fillRect(w * 0.22, 0, w * 0.1, h);
+  ctx.fillRect(w * 0.68, 0, w * 0.1, h);
+  // dashed center line (measured as a fraction of width so it stays the same
+  // relative thickness regardless of texture resolution)
   ctx.fillStyle = '#e8c94a';
   const dashH = h * 0.12;
+  const lineW = w * 0.06;
   for (let y = 0; y < h; y += dashH * 2) {
-    ctx.fillRect(w / 2 - 2, y, 4, dashH);
+    ctx.fillRect(w / 2 - lineW / 2, y, lineW, dashH);
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
   return tex;
 }
 
@@ -133,5 +140,6 @@ export function buildSidewalkTexture(THREE, { size = 128 } = {}) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
   return tex;
 }

@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { buildCity } from './city.js';
 import { Vehicle, RemoteCar } from './vehicle.js';
@@ -29,6 +30,15 @@ renderer.domElement.style.display = 'none';
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 1000);
+
+// A generic studio-style environment map, applied globally via
+// scene.environment, is what makes PBR metal/clearcoat materials (car paint,
+// glass, streetlight poles, …) actually look real instead of flat — without
+// it, MeshStandardMaterial/MeshPhysicalMaterial only have the sky/sun to
+// reflect and everything reads as matte plastic regardless of metalness.
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+pmremGenerator.dispose();
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
@@ -105,18 +115,80 @@ setBootProgress(100, 'Готово');
 const keys = new Set();
 addEventListener('keydown', (e) => {
   keys.add(e.code);
-  if (e.code === 'KeyC') cameraMode = (cameraMode + 1) % 2;
+  if (e.code === 'KeyC') {
+    cameraMode = (cameraMode + 1) % 3;
+    if (cameraMode === 2) enterFreeCam();
+    else exitFreeCam();
+  }
   if (e.code === 'KeyR') respawnCar();
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 
-let cameraMode = 0; // 0 = chase, 1 = close chase
+let cameraMode = 0; // 0 = chase, 1 = close chase, 2 = free-fly
+
+// ---------------------------------------------------------------------------
+// Free-fly camera: mouse-look (pointer lock) + WASD/QE flight, independent of
+// the car. While active, WASD drives the camera instead of the car — the car
+// stays drivable via the arrow keys so you can still watch it move around.
+// ---------------------------------------------------------------------------
+const freeCam = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, active: false };
+
+function enterFreeCam() {
+  freeCam.pos.copy(camera.position);
+  const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+  freeCam.yaw = euler.y;
+  freeCam.pitch = euler.x;
+  freeCam.active = true;
+  if (renderer.domElement.requestPointerLock) renderer.domElement.requestPointerLock();
+  setNetStatus('Свободная камера: мышь — обзор, WASD — полёт, Q/E — высота, Shift — ускорение, C — выход');
+}
+
+function exitFreeCam() {
+  freeCam.active = false;
+  if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+}
+
+addEventListener('mousemove', (e) => {
+  if (!freeCam.active || document.pointerLockElement !== renderer.domElement) return;
+  const sens = 0.0025;
+  freeCam.yaw -= e.movementX * sens;
+  freeCam.pitch -= e.movementY * sens;
+  const limit = Math.PI / 2 - 0.01;
+  freeCam.pitch = Math.max(-limit, Math.min(limit, freeCam.pitch));
+});
+
+document.addEventListener('pointerlockchange', () => {
+  // user hit Esc (or lost focus) — fall back to chase cam rather than being
+  // stuck in a free cam that can no longer look around
+  if (freeCam.active && document.pointerLockElement !== renderer.domElement) {
+    freeCam.active = false;
+    cameraMode = 0;
+  }
+});
+
+function updateFreeCam(dt) {
+  const euler = new THREE.Euler(freeCam.pitch, freeCam.yaw, 0, 'YXZ');
+  camera.quaternion.setFromEuler(euler);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 65 : 22;
+  if (keys.has('KeyW')) freeCam.pos.addScaledVector(forward, speed * dt);
+  if (keys.has('KeyS')) freeCam.pos.addScaledVector(forward, -speed * dt);
+  if (keys.has('KeyA')) freeCam.pos.addScaledVector(right, -speed * dt);
+  if (keys.has('KeyD')) freeCam.pos.addScaledVector(right, speed * dt);
+  if (keys.has('KeyE')) freeCam.pos.y += speed * dt;
+  if (keys.has('KeyQ')) freeCam.pos.y -= speed * dt;
+  camera.position.copy(freeCam.pos);
+}
 
 function readInput() {
-  const fwd = keys.has('KeyW') || keys.has('ArrowUp');
-  const back = keys.has('KeyS') || keys.has('ArrowDown');
-  const left = keys.has('KeyA') || keys.has('ArrowLeft');
-  const right = keys.has('KeyD') || keys.has('ArrowRight');
+  // While free-flying, WASD steers the camera instead — the car is still
+  // drivable through the arrow keys so it doesn't just sit there.
+  const useWasdForDriving = cameraMode !== 2;
+  const fwd = (useWasdForDriving && keys.has('KeyW')) || keys.has('ArrowUp');
+  const back = (useWasdForDriving && keys.has('KeyS')) || keys.has('ArrowDown');
+  const left = (useWasdForDriving && keys.has('KeyA')) || keys.has('ArrowLeft');
+  const right = (useWasdForDriving && keys.has('KeyD')) || keys.has('ArrowRight');
   const handbrake = keys.has('Space');
 
   let throttle = 0;
@@ -389,7 +461,8 @@ function loop(now) {
   destructibles.update(dt);
   effects.update(dt);
   for (const rc of remoteCars.values()) rc.update(dt);
-  updateCamera(dt);
+  if (cameraMode === 2) updateFreeCam(dt);
+  else updateCamera(dt);
 
   const speedKmh = car.getSpeedKmh();
   audio.updateEngine(car.chassisBody.velocity.length(), Math.abs(input.throttle));
