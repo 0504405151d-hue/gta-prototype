@@ -1,0 +1,14 @@
+{
+  "name": "city-drive-multiplayer",
+  "version": "1.0.0",
+  "description": "Browser 3D multiplayer city driving prototype with physics-based destruction (Three.js + cannon-es + WebSocket)",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>City Drive — Multiplayer Prototype</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #05070d; overflow: hidden; font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  canvas { display: block; }
+
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #eaf0ff; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+
+  #speed { position: absolute; right: 24px; bottom: 24px; text-align: right; }
+  #speed .val { font-size: 54px; font-weight: 700; line-height: 1; }
+  #speed .unit { font-size: 14px; opacity: .7; letter-spacing: 2px; }
+
+  #players { position: absolute; left: 20px; top: 20px; font-size: 13px; background: rgba(10,14,24,.45); border-radius: 10px; padding: 10px 14px; min-width: 150px; backdrop-filter: blur(4px); }
+  #players h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; opacity: .7; }
+  #players .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #players .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  #pingRow { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.12); font-size: 11px; opacity: .75; }
+
+  #minimapWrap { position: absolute; right: 20px; top: 20px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.18); box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+  #minimap { display: block; }
+
+  #help { position: absolute; left: 20px; bottom: 24px; font-size: 12px; line-height: 1.6; background: rgba(10,14,24,.45); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(4px); }
+  #help b { opacity: .9; }
+
+  #netStatus { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); font-size: 13px; background: rgba(10,14,24,.5); padding: 6px 14px; border-radius: 20px; }
+
+  #boot { position: fixed; inset: 0; background: #05070d; color: #cfd8ff; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; z-index: 20; font-size: 15px; }
+  #boot .bar { width: 260px; height: 6px; border-radius: 4px; background: #1a2038; overflow: hidden; }
+  #boot .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#3b82f6,#22d3ee); transition: width .2s ease; }
+
+  #startOverlay { position: fixed; inset: 0; background: rgba(3,5,10,.72); z-index: 15; display: flex; align-items: center; justify-content: center; }
+  #startOverlay .card { background: #0c1120; border: 1px solid #232b45; padding: 28px 34px; border-radius: 16px; max-width: 420px; color: #dfe6ff; text-align: center; }
+  #startOverlay h1 { font-size: 20px; margin: 0 0 10px; }
+  #startOverlay p { font-size: 13px; line-height: 1.6; opacity: .8; margin: 0 0 18px; }
+  #startOverlay button { background: linear-gradient(135deg,#3b82f6,#22d3ee); border: none; color: #04101f; font-weight: 700; padding: 12px 26px; border-radius: 10px; font-size: 14px; cursor: pointer; }
+  #startOverlay button:hover { filter: brightness(1.08); }
+  #startOverlay input { width: 100%; box-sizing: border-box; margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid #2a3352; background: #0a0f1e; color: #eaf0ff; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <div>Загрузка города…</div>
+  <div class="bar"><div class="fill" id="bootFill"></div></div>
+</div>
+
+<div id="startOverlay" style="display:none">
+  <div class="card">
+    <h1>City Drive — Multiplayer</h1>
+    <p>Управление: <b>WASD/стрелки</b> — газ/руль, <b>Пробел</b> — ручник, <b>C</b> — смена камеры, <b>R</b> — respawn.<br/>
+    Врезайся в бочки, конусы и заборы — они разлетаются по физике, а кузов реально мнётся об здания.</p>
+    <input id="nameHint" placeholder="Ник (необязательно)" maxlength="16" />
+    <button id="startBtn">Сесть за руль</button>
+  </div>
+</div>
+
+<div id="hud" style="display:none">
+  <div id="speed"><span class="val" id="speedVal">0</span><br/><span class="unit">км/ч</span></div>
+  <div id="players">
+    <h3>Игроки онлайн</h3>
+    <div id="playerList"></div>
+    <div id="pingRow">Пинг: <span id="ping">—</span></div>
+  </div>
+  <div id="minimapWrap"><canvas id="minimap" width="160" height="160"></canvas></div>
+  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера &nbsp; <b>R</b> respawn</div>
+  <div id="netStatus" style="display:none"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+  }
+}
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

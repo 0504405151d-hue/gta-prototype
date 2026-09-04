@@ -1,0 +1,399 @@
+// A drivable car: cannon-es RaycastVehicle (chassis + 4 raycast wheels with
+// suspension) driving a Three.js mesh. Tuned for a "GTA San Andreas-ish"
+// arcade-but-weighty feel: body roll, suspension travel, drift on handbrake.
+//
+// Also owns two bits of "juice" that read straight off the physics rather
+// than being faked: a per-vertex body dent that grows out of real collision
+// points/speeds against buildings, and per-wheel skid state (from cannon-es's
+// own tire slip model) that main.js uses to trigger skid marks/dust/sound.
+
+export const WHEEL_RADIUS = 0.36;
+
+const DENT_RADIUS = 0.85;
+const DENT_MAX_PUSH = 0.22;
+const DENT_SPEED_THRESHOLD = 3.2;
+
+export class Vehicle {
+  constructor(THREE, CANNON, world, scene, { color = 0xff3b30, position = { x: 0, y: 1.2, z: 0 }, heading = 0, onEffect } = {}) {
+    this.THREE = THREE;
+    this.CANNON = CANNON;
+    this.world = world;
+    this.onEffect = onEffect || (() => {});
+
+    // ---------- Chassis ----------
+    const chassisW = 1.9, chassisH = 0.65, chassisL = 4.2;
+    this.dims = { chassisW, chassisH, chassisL };
+    const chassisShape = new CANNON.Box(new CANNON.Vec3(chassisW / 2, chassisH / 2, chassisL / 2));
+    const chassisBody = new CANNON.Body({ mass: 165, material: new CANNON.Material('chassis') });
+    chassisBody.addShape(chassisShape, new CANNON.Vec3(0, 0.4, 0));
+    chassisBody.position.set(position.x, position.y, position.z);
+    chassisBody.quaternion.setFromEuler(0, heading, 0);
+    chassisBody.angularVelocity.set(0, 0, 0);
+    chassisBody.linearDamping = 0.06;
+    chassisBody.angularDamping = 0.5;
+    chassisBody.userData = { isVehicle: true };
+    this.chassisBody = chassisBody;
+    chassisBody.addEventListener('collide', (e) => this._onChassisCollide(e));
+
+    const vehicle = new CANNON.RaycastVehicle({
+      chassisBody,
+      indexRightAxis: 0,
+      indexUpAxis: 1,
+      indexForwardAxis: 2,
+    });
+
+    // Values below were verified in a standalone headless cannon-es
+    // simulation (straight-line + steering-under-load tests) to give a
+    // stable, non-flipping ride at speed rather than guessed blind.
+    const wheelOptions = {
+      radius: WHEEL_RADIUS,
+      directionLocal: new CANNON.Vec3(0, -1, 0),
+      suspensionStiffness: 28,
+      suspensionRestLength: 0.36,
+      frictionSlip: 3.2,
+      dampingRelaxation: 3.2,
+      dampingCompression: 4.3,
+      maxSuspensionForce: 100000,
+      rollInfluence: 0.01,
+      axleLocal: new CANNON.Vec3(1, 0, 0),
+      chassisConnectionPointLocal: new CANNON.Vec3(),
+      maxSuspensionTravel: 0.28,
+      customSlidingRotationalSpeed: -32,
+      useCustomSlidingRotationalSpeed: true,
+    };
+
+    const axleX = chassisW / 2 - 0.05;
+    const front = chassisL / 2 - 0.75;
+    const rear = -chassisL / 2 + 0.65;
+    const connY = 0.05;
+
+    const points = [
+      [-axleX, connY, front],  // front-left
+      [axleX, connY, front],   // front-right
+      [-axleX, connY, rear],   // rear-left
+      [axleX, connY, rear],    // rear-right
+    ];
+    points.forEach((p) => {
+      wheelOptions.chassisConnectionPointLocal.set(p[0], p[1], p[2]);
+      vehicle.addWheel({ ...wheelOptions });
+    });
+    vehicle.addToWorld(world);
+    this.vehicle = vehicle;
+
+    // ---------- Visual mesh ----------
+    const group = new THREE.Group();
+    scene.add(group);
+    this.group = group;
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.55 });
+    this.bodyMat = bodyMat;
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0x0d1420, roughness: 0.15, metalness: 0.2 });
+
+    const baseGeo = new THREE.BoxGeometry(chassisW, chassisH * 0.55, chassisL, 3, 2, 6);
+    const base = new THREE.Mesh(baseGeo, bodyMat);
+    base.position.set(0, 0.4, 0);
+    base.castShadow = true;
+    base.receiveShadow = true;
+    group.add(base);
+    this.baseMesh = base;
+    this.baseGeo = baseGeo;
+    this._dentBase = Float32Array.from(baseGeo.attributes.position.array);
+    this._dentAccum = new Float32Array(baseGeo.attributes.position.count);
+
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.82, 0.5, chassisL * 0.5), glassMat);
+    cabin.position.set(0, 0.4 + chassisH * 0.55 / 2 + 0.25, -0.15);
+    cabin.castShadow = true;
+    group.add(cabin);
+
+    // headlights (emissive + real lights for a bit of night-driving drama)
+    const lightMat = new THREE.MeshStandardMaterial({ color: 0xfff6dd, emissive: 0xfff2c0, emissiveIntensity: 3 });
+    [-0.6, 0.6].forEach((x) => {
+      const hl = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), lightMat);
+      hl.position.set(x, 0.45, chassisL / 2 - 0.05);
+      group.add(hl);
+    });
+    const headBeam = new THREE.SpotLight(0xfff2c0, 12, 40, Math.PI / 6, 0.4, 1.2);
+    headBeam.position.set(0, 0.6, chassisL / 2);
+    headBeam.target.position.set(0, 0, chassisL / 2 + 10);
+    group.add(headBeam, headBeam.target);
+
+    const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.4 });
+    [-0.6, 0.6].forEach((x) => {
+      const tl = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), tailMat);
+      tl.position.set(x, 0.45, -chassisL / 2 + 0.05);
+      group.add(tl);
+    });
+
+    this.wheelMeshes = [];
+    for (let i = 0; i < 4; i++) {
+      const wheel = new THREE.Mesh(
+        new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.32, 18),
+        new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.85 })
+      );
+      wheel.rotation.z = Math.PI / 2;
+      wheel.castShadow = true;
+      group.add(wheel);
+      this.wheelMeshes.push(wheel);
+    }
+
+    // control state
+    this.input = { throttle: 0, steer: 0, brake: 0, handbrake: false };
+    this.maxSteer = 0.32;
+    this.maxForce = 1000;
+    this.maxBrakeForce = 55;
+  }
+
+  setInput(input) {
+    Object.assign(this.input, input);
+  }
+
+  update(dt) {
+    const v = this.vehicle;
+    const { throttle, steer, brake, handbrake } = this.input;
+
+    const engineForce = -throttle * this.maxForce;
+    v.applyEngineForce(engineForce, 2);
+    v.applyEngineForce(engineForce, 3);
+
+    const steerValue = steer * this.maxSteer;
+    v.setSteeringValue(steerValue, 0);
+    v.setSteeringValue(steerValue, 1);
+
+    const brakeForce = handbrake ? this.maxBrakeForce * 4 : brake * this.maxBrakeForce;
+    for (let i = 0; i < 4; i++) {
+      // handbrake locks the rear wheels for drift; normal brake acts on all four
+      v.setBrake(handbrake ? (i >= 2 ? brakeForce : 0) : brakeForce, i);
+    }
+
+    // sync visuals
+    const chassis = this.chassisBody;
+    this.group.position.copy(chassis.position);
+    this.group.quaternion.copy(chassis.quaternion);
+
+    for (let i = 0; i < 4; i++) {
+      v.updateWheelTransform(i);
+      const t = v.wheelInfos[i].worldTransform;
+      const mesh = this.wheelMeshes[i];
+      mesh.position.copy(t.position);
+      mesh.quaternion.copy(t.quaternion);
+      mesh.rotateZ(Math.PI / 2);
+    }
+  }
+
+  /**
+   * Per-wheel skid state for this frame, in world space — main.js uses this
+   * to lay skid marks / kick up dust / drive the tire-screech sound without
+   * duplicating cannon-es's own tire-slip math.
+   */
+  getWheelSkidStates() {
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+      const info = this.vehicle.wheelInfos[i];
+      out.push({
+        position: info.worldTransform.position,
+        inContact: !!info.isInContact,
+        // skidInfo is 1.0 at full grip, drops toward 0 as the tire slips
+        skidding: !!info.isInContact && info.skidInfo < 0.85,
+        skidAmount: 1 - Math.min(1, Math.max(0, info.skidInfo)),
+        rear: i >= 2,
+      });
+    }
+    return out;
+  }
+
+  getSpeedKmh() {
+    return this.chassisBody.velocity.length() * 3.6;
+  }
+
+  getTransform() {
+    const p = this.chassisBody.position;
+    const q = this.chassisBody.quaternion;
+    return { p: [p.x, p.y, p.z], q: [q.x, q.y, q.z, q.w], v: this.chassisBody.velocity.length() };
+  }
+
+  respawn(position, heading = 0) {
+    const b = this.chassisBody;
+    b.position.set(position.x, position.y, position.z);
+    b.quaternion.setFromEuler(0, heading, 0);
+    b.velocity.set(0, 0, 0);
+    b.angularVelocity.set(0, 0, 0);
+    this._resetDents();
+  }
+
+  // -------------------------------------------------------------------
+  // Body damage: push mesh vertices near a hard collision point inward,
+  // capped per-vertex so the mesh can't fold in on itself after many hits.
+  // -------------------------------------------------------------------
+  _onChassisCollide(e) {
+    const other = e.body;
+    if (!other.userData || !other.userData.isBuilding) return; // only solid structures dent the car
+    const contact = e.contact;
+    const impactSpeed = contact.getImpactVelocityAlongNormal ? Math.abs(contact.getImpactVelocityAlongNormal()) : 0;
+    if (impactSpeed < DENT_SPEED_THRESHOLD) return;
+
+    const isBi = contact.bi === this.chassisBody;
+    const rWorld = isBi ? contact.ri : contact.rj;
+    const worldPoint = new this.CANNON.Vec3();
+    this.chassisBody.position.vadd(rWorld, worldPoint);
+
+    this._applyDent(worldPoint, impactSpeed);
+    this.onEffect('impact', { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z }, Math.min(1, impactSpeed / 10));
+  }
+
+  _applyDent(worldPoint, speed) {
+    const local = new this.CANNON.Vec3();
+    this.chassisBody.pointToLocalFrame(worldPoint, local);
+    // base mesh sits at a fixed offset from the chassis body origin; work in
+    // its local space so we can compare directly against geometry vertices
+    const off = this.baseMesh.position;
+    const ix = local.x - off.x;
+    const iy = local.y - off.y;
+    const iz = local.z - off.z;
+
+    const pos = this.baseGeo.attributes.position;
+    const strength = Math.min(1, speed / 14) * DENT_MAX_PUSH;
+    let touched = false;
+
+    for (let i = 0; i < pos.count; i++) {
+      const bx = this._dentBase[i * 3];
+      const by = this._dentBase[i * 3 + 1];
+      const bz = this._dentBase[i * 3 + 2];
+      const dx = bx - ix, dy = by - iy, dz = bz - iz;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > DENT_RADIUS) continue;
+      const remaining = DENT_MAX_PUSH - this._dentAccum[i];
+      if (remaining <= 0.001) continue;
+
+      const falloff = 1 - dist / DENT_RADIUS;
+      const push = Math.min(remaining, strength * falloff * falloff);
+      if (push <= 0) continue;
+
+      // move the current vertex toward the impact point (crater shape)
+      const cx = pos.getX(i), cy = pos.getY(i), cz = pos.getZ(i);
+      const tdx = ix - (bx), tdy = iy - (by), tdz = iz - (bz);
+      const tlen = Math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz) || 1;
+      pos.setXYZ(i, cx + (tdx / tlen) * push, cy + (tdy / tlen) * push, cz + (tdz / tlen) * push);
+      this._dentAccum[i] += push;
+      touched = true;
+    }
+
+    if (touched) {
+      pos.needsUpdate = true;
+      this.baseGeo.computeVertexNormals();
+    }
+  }
+
+  _resetDents() {
+    const pos = this.baseGeo.attributes.position;
+    pos.array.set(this._dentBase);
+    pos.needsUpdate = true;
+    this._dentAccum.fill(0);
+    this.baseGeo.computeVertexNormals();
+  }
+}
+
+// A remote player's car: no local physics simulation — its transform is
+// driven entirely by network updates. Uses a small delayed interpolation
+// buffer (the classic "entity interpolation" approach used in most online
+// games) instead of a naive per-frame lerp, so playback stays smooth even
+// when packets arrive at uneven intervals or one is lost.
+const INTERP_DELAY_MS = 100;
+const BUFFER_MAX_AGE_MS = 1000;
+
+export class RemoteCar {
+  constructor(THREE, scene, color = 0x999999) {
+    this.THREE = THREE;
+    const group = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.5 });
+    const base = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.36, 4.2), bodyMat);
+    base.position.y = 0.4;
+    base.castShadow = true;
+    group.add(base);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.56, 0.5, 2.1), new THREE.MeshStandardMaterial({ color: 0x0d1420 }));
+    cabin.position.set(0, 0.65, -0.15);
+    group.add(cabin);
+    scene.add(group);
+    this.group = group;
+
+    this.buffer = []; // { t: local receive time (ms), p:[x,y,z], q:[x,y,z,w] }
+    this._initialized = false;
+  }
+
+  setTarget(state) {
+    if (!state || !state.p || !state.q) return;
+    const now = performance.now();
+    this.buffer.push({ t: now, p: state.p, q: state.q });
+    const cutoff = now - BUFFER_MAX_AGE_MS;
+    while (this.buffer.length > 2 && this.buffer[0].t < cutoff) this.buffer.shift();
+    if (this.buffer.length > 40) this.buffer.shift();
+  }
+
+  update(dt) {
+    const buf = this.buffer;
+    if (buf.length === 0) return;
+
+    if (!this._initialized) {
+      const last = buf[buf.length - 1];
+      this.group.position.set(last.p[0], last.p[1], last.p[2]);
+      this.group.quaternion.set(last.q[0], last.q[1], last.q[2], last.q[3]);
+      this._initialized = true;
+      return;
+    }
+
+    const renderTime = performance.now() - INTERP_DELAY_MS;
+
+    if (buf.length === 1) {
+      // only one sample ever received — just sit there, nothing to interpolate
+      const s = buf[0];
+      this.group.position.set(s.p[0], s.p[1], s.p[2]);
+      this.group.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
+      return;
+    }
+
+    // find the pair of samples bracketing renderTime
+    let a = null, b = null;
+    for (let i = 0; i < buf.length - 1; i++) {
+      if (buf[i].t <= renderTime && buf[i + 1].t >= renderTime) {
+        a = buf[i];
+        b = buf[i + 1];
+        break;
+      }
+    }
+
+    if (!a || !b) {
+      if (renderTime < buf[0].t) {
+        // brand new remote player, not enough history yet — snap to oldest known
+        a = b = buf[0];
+      } else {
+        // network lagging behind our render delay — extrapolate from the two newest samples
+        a = buf[buf.length - 2];
+        b = buf[buf.length - 1];
+        const span = Math.max(1, b.t - a.t);
+        const frac = Math.min(2, (renderTime - a.t) / span); // cap extrapolation to 2x the last interval
+        this._setLerped(a, b, frac);
+        return;
+      }
+    }
+
+    const span = Math.max(1, b.t - a.t);
+    const frac = Math.min(1, Math.max(0, (renderTime - a.t) / span));
+    this._setLerped(a, b, frac);
+  }
+
+  _setLerped(a, b, frac) {
+    const g = this.group;
+    g.position.set(
+      a.p[0] + (b.p[0] - a.p[0]) * frac,
+      a.p[1] + (b.p[1] - a.p[1]) * frac,
+      a.p[2] + (b.p[2] - a.p[2]) * frac
+    );
+    const qa = new this.THREE.Quaternion(a.q[0], a.q[1], a.q[2], a.q[3]);
+    const qb = new this.THREE.Quaternion(b.q[0], b.q[1], b.q[2], b.q[3]);
+    qa.slerp(qb, frac);
+    g.quaternion.copy(qa);
+  }
+
+  dispose(scene) {
+    scene.remove(this.group);
+  }
+}
