@@ -41,6 +41,32 @@ export class DestructibleField {
     }
   }
 
+  /**
+   * Remove every current prop and shatter fragment and spawn a fresh field
+   * in their place — used by the admin/debug panel's "restore destructible
+   * objects" button (main.js). Deliberately LOCAL ONLY: it doesn't send
+   * anything over the network, so it doesn't touch what other connected
+   * players see. That's consistent with every other admin-panel toggle
+   * (god mode, turbo) being a single-player convenience rather than
+   * shared world state — a real reset-for-everyone would need the server
+   * to forget its shatteredIds/propRest history too, which is out of scope
+   * for a debug button.
+   */
+  resetField(spots) {
+    for (const record of this.props.values()) {
+      this.scene.remove(record.mesh);
+      this.world.removeBody(record.body);
+    }
+    this.props.clear();
+    for (const d of this.debris) {
+      this.scene.remove(d.mesh);
+      this.world.removeBody(d.body);
+    }
+    this.debris = [];
+    this.pendingHits = [];
+    this.spawnField(spots);
+  }
+
   _spawnProp(kind, x, z) {
     const { THREE, CANNON, world, scene } = this;
     const id = this._nextId++;

@@ -2,12 +2,17 @@
 // city.js builds, on a simple node graph (one node per intersection). Each
 // car keeps a lane offset to the right of the centerline so opposite-flowing
 // traffic doesn't overlap, brakes for whatever's ahead of it in its own
-// lane, and picks a new direction (mostly straight, sometimes a turn) every
-// time it reaches an intersection. Movement is fully scripted (no real
-// steering physics) but every car still owns a real KINEMATIC cannon-es
-// body, so the player's own (dynamic) car can actually crash into one —
-// cannon-es resolves that collision using the traffic car's real velocity,
-// it just isn't itself pushed around by anything.
+// lane (including the player's own car and every other connected player —
+// see the `obstacles` param on update()), and picks a new direction (mostly
+// straight, sometimes a turn) every time it reaches an intersection. A turn
+// is a short, slowed-down curved arc through the intersection rather than
+// an instant snap to the new heading (see _beginTurn()/_placeCarOnArc()) —
+// real drivers round a corner, they don't teleport into a new orientation.
+// Movement is fully scripted (no real steering physics) but every car still
+// owns a real KINEMATIC cannon-es body, so the player's own (dynamic) car
+// can actually crash into one — cannon-es resolves that collision using the
+// traffic car's real velocity, it just isn't itself pushed around by
+// anything.
 
 import { rand, randInt, choice } from './utils.js';
 
@@ -113,6 +118,8 @@ export class TrafficSystem {
       t: rand(0, 1),
       speed: rand(4.5, 8),
       targetSpeed: rand(4.5, 8),
+      turnSpeed: 5,
+      turn: null, // set while rounding a corner — see _beginTurn()/_placeCarOnArc()
       lastPos: new this.THREE.Vector3(),
     };
     this._placeCar(car);
@@ -141,46 +148,136 @@ export class TrafficSystem {
     }
   }
 
-  update(dt) {
+  // True if `pos` is roughly ahead of `car` along its current heading and
+  // within `lateral` of its lane centerline — the shared test behind both
+  // "brake for the traffic car ahead" and "brake for the player ahead".
+  _isAheadAndClose(car, pos, lateral, lookahead) {
+    const toX = pos.x - car.mesh.position.x, toZ = pos.z - car.mesh.position.z;
+    const dist = Math.hypot(toX, toZ);
+    if (dist > lookahead) return false;
+    const aheadDot = toX * car.dx + toZ * car.dz; // >0 means ahead along our heading
+    const lateralOff = Math.abs(toX * car.dz - toZ * car.dx); // perpendicular offset from our lane
+    return aheadDot > 0.5 && lateralOff < lateral;
+  }
+
+  /**
+   * Kick off a smooth, curved hand-off between two lanes instead of
+   * snapping directly from one to the other. Before this existed, reaching
+   * an intersection with a new direction picked just reassigned car.dx/dz
+   * and re-ran _placeCar() on the SAME frame: since a lane's position is
+   * offset sideways from the street centerline (see _laneWorld) and that
+   * offset rotates 90° with the direction, the car's position visibly
+   * "popped" sideways at the exact same instant its heading snapped 90° —
+   * a real turn made no visual sense, closer to a car teleporting into a
+   * new orientation than steering into a corner. Now the car instead
+   * travels a short quadratic Bézier arc from where it actually is (the
+   * old lane's arrival point) to where the new lane starts, with its
+   * heading following the arc's own tangent the whole way — continuous,
+   * no snap — and a slower speed target while committed to the curve, the
+   * way a real driver eases off the gas through a corner instead of
+   * carrying full straight-away speed into it.
+   */
+  _beginTurn(car, newDir) {
+    const p0 = this._laneWorld(car.ix, car.iz, car.dx, car.dz);
+    const p2 = this._laneWorld(car.ix, car.iz, newDir.dx, newDir.dz);
+    const nodeX = this.streetCoords[car.ix], nodeZ = this.streetCoords[car.iz];
+    const chord = Math.hypot(p2.x - p0.x, p2.z - p0.z);
+    car.turn = { p0, p1: { x: nodeX, z: nodeZ }, p2, s: 0, len: Math.max(chord * 1.18, 2) };
+    car.dx = newDir.dx;
+    car.dz = newDir.dz;
+    car.turnSpeed = rand(3, 5); // real drivers slow down for corners, not just intersections with cars in them
+  }
+
+  // Position + heading partway along the current turn arc (quadratic
+  // Bézier through the intersection); heading comes from the curve's own
+  // tangent so it turns continuously instead of jumping between the two
+  // lanes' fixed headings.
+  _placeCarOnArc(car) {
+    const s = Math.min(1, car.turn.s);
+    const { p0, p1, p2 } = car.turn;
+    const x = (1 - s) * (1 - s) * p0.x + 2 * (1 - s) * s * p1.x + s * s * p2.x;
+    const z = (1 - s) * (1 - s) * p0.z + 2 * (1 - s) * s * p1.z + s * s * p2.z;
+    const tx = 2 * (1 - s) * (p1.x - p0.x) + 2 * s * (p2.x - p1.x);
+    const tz = 2 * (1 - s) * (p1.z - p0.z) + 2 * s * (p2.z - p1.z);
+    const yaw = Math.hypot(tx, tz) > 1e-4 ? Math.atan2(tx, tz) : car.mesh.rotation.y;
+    car.mesh.position.set(x, 0, z);
+    car.mesh.rotation.y = yaw;
+    car.body.position.set(x, CAR_H / 2, z);
+    car.body.quaternion.setFromEuler(0, yaw, 0);
+  }
+
+  /**
+   * @param obstacles optional list of `{x, z, lateral?, lookahead?,
+   *   panicRadius?}` points to also brake for — main.js passes the local
+   *   player's car (and, so AI "reacts to players" plural, every connected
+   *   remote player's car too) here every frame. Wider tolerances than the
+   *   traffic-vs-traffic check on purpose: a human driver doesn't reliably
+   *   stay lane-perfect the way scripted traffic does, so a real driver
+   *   reacting to one gives it more room to be sloppy — and `panicRadius`
+   *   is an omnidirectional "someone is right on top of us" check that
+   *   ignores lane/heading entirely, for when a player rams in sideways or
+   *   stops across the lane rather than staying neatly in front.
+   */
+  update(dt, obstacles = []) {
     const segLen = this.streetCoords[1] !== undefined ? Math.abs(this.streetCoords[1] - this.streetCoords[0]) : 34;
 
     for (const car of this.cars) {
       // Brake for the nearest car ahead of us in roughly the same lane —
       // a lightweight stand-in for real lane reservation/intersection
       // priority, just enough that traffic doesn't visibly drive through
-      // itself in a straight line.
+      // itself (or the player) in a straight line.
       let blocked = false;
       for (const other of this.cars) {
         if (other === car) continue;
-        const toOther = { x: other.mesh.position.x - car.mesh.position.x, z: other.mesh.position.z - car.mesh.position.z };
-        const dist = Math.hypot(toOther.x, toOther.z);
-        if (dist > 7) continue;
-        const aheadDot = toOther.x * car.dx + toOther.z * car.dz; // >0 means other is ahead along our heading
-        const lateral = Math.abs(toOther.x * car.dz - toOther.z * car.dx); // perpendicular offset
-        if (aheadDot > 0.5 && lateral < 2.2) { blocked = true; break; }
+        if (this._isAheadAndClose(car, other.mesh.position, 2.2, 7)) { blocked = true; break; }
       }
-      car.targetSpeed = blocked ? 0 : car.targetSpeed;
-      car.speed += ((blocked ? 0 : Math.max(car.speed, 4.5)) - car.speed) * Math.min(1, dt * 2);
+      if (!blocked) {
+        for (const obs of obstacles) {
+          const dx = obs.x - car.mesh.position.x, dz = obs.z - car.mesh.position.z;
+          if (Math.hypot(dx, dz) < (obs.panicRadius ?? 3.4)) { blocked = true; break; }
+          if (this._isAheadAndClose(car, obs, obs.lateral ?? 3, obs.lookahead ?? 10)) { blocked = true; break; }
+        }
+      }
+
+      const cruiseTarget = car.turn ? car.turnSpeed : car.targetSpeed;
+      car.targetSpeed = blocked ? 0 : cruiseTarget;
+      car.speed += ((blocked ? 0 : Math.max(car.speed, 3)) - car.speed) * Math.min(1, dt * 2.2);
       if (blocked) car.speed = Math.max(0, car.speed - dt * 9);
 
-      const advance = (car.speed * dt) / segLen;
-      car.t += advance;
+      if (car.turn) {
+        car.turn.s += (car.speed * dt) / car.turn.len;
+        if (car.turn.s >= 1) {
+          car.turn = null;
+          car.t = 0;
+          car.targetSpeed = rand(4.5, 8);
+          this._placeCar(car);
+        } else {
+          this._placeCarOnArc(car);
+        }
+      } else {
+        car.t += (car.speed * dt) / segLen;
 
-      while (car.t >= 1) {
-        car.t -= 1;
-        car.ix += car.dx;
-        car.iz += car.dz;
-        const dirs = this._validDirs(car.ix, car.iz, car.dx);
-        // Heavily favor continuing straight so traffic reads as cars going
-        // somewhere, not randomly zig-zagging at every single corner.
-        const straight = dirs.find((d) => d.dx === car.dx && d.dz === car.dz);
-        const pick = straight && rand(0, 1) < 0.72 ? straight : choice(dirs.length ? dirs : this._validDirs(car.ix, car.iz, null));
-        car.dx = pick.dx;
-        car.dz = pick.dz;
-        car.targetSpeed = rand(4.5, 8);
+        if (car.t >= 1) {
+          car.t -= 1;
+          car.ix += car.dx;
+          car.iz += car.dz;
+          const dirs = this._validDirs(car.ix, car.iz, car.dx);
+          // Heavily favor continuing straight so traffic reads as cars
+          // going somewhere, not randomly zig-zagging at every corner.
+          const straight = dirs.find((d) => d.dx === car.dx && d.dz === car.dz);
+          const pick = straight && rand(0, 1) < 0.72 ? straight : choice(dirs.length ? dirs : this._validDirs(car.ix, car.iz, null));
+          if (pick.dx === car.dx && pick.dz === car.dz) {
+            car.targetSpeed = rand(4.5, 8);
+            this._placeCar(car);
+          } else {
+            this._beginTurn(car, pick);
+            this._placeCarOnArc(car);
+          }
+        } else {
+          this._placeCar(car);
+        }
       }
 
-      this._placeCar(car);
       // Kinematic bodies aren't pushed by cannon-es, but they DO need a
       // real velocity set so the player's car (a dynamic body) gets a
       // correct impulse when it hits one, instead of bouncing off

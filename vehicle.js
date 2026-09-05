@@ -234,8 +234,13 @@ export class Vehicle {
       group.add(pipe);
     });
 
-    // headlights (emissive + real lights for a bit of night-driving drama)
+    // headlights (emissive + real lights for a bit of night-driving drama).
+    // Used to be permanently on; the player now toggles them with H (see
+    // setHeadlightsOn() below and main.js), so both the lamp material and
+    // the actual light are kept on the instance instead of staying local
+    // consts here.
     const lightMat = new THREE.MeshStandardMaterial({ color: 0xfff6dd, emissive: 0xfff2c0, emissiveIntensity: 3 });
+    this.lightMat = lightMat;
     [-0.6, 0.6].forEach((x) => {
       const hl = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), lightMat);
       hl.position.set(x, 0.45, chassisL / 2 - 0.05);
@@ -251,6 +256,8 @@ export class Vehicle {
     headBeam.position.set(0, 0.45, chassisL / 2 + 0.15);
     headBeam.target.position.set(0, 0, chassisL / 2 + 10);
     group.add(headBeam, headBeam.target);
+    this.headBeam = headBeam;
+    this._headlightsOn = true;
 
     const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.4 });
     this.tailMat = tailMat;
@@ -313,6 +320,10 @@ export class Vehicle {
     this.maxSteer = maxSteer;
     this.maxForce = maxForce;
     this.maxBrakeForce = maxBrakeForce;
+    // Admin-panel "god mode" (main.js) — collision physics still happens
+    // (the car still bounces off things), this only skips the cosmetic
+    // dent/damage reaction in _onChassisCollide below.
+    this.godMode = false;
   }
 
   setInput(input) {
@@ -323,7 +334,20 @@ export class Vehicle {
     const v = this.vehicle;
     const { throttle, steer, brake, handbrake } = this.input;
 
-    const engineForce = -throttle * this.maxForce;
+    // Sign verified by directly simulating cannon-es's RaycastVehicle rather
+    // than guessing: with indexForwardAxis=2/indexUpAxis=1/indexRightAxis=0
+    // and this project's directionLocal=(0,-1,0)/axleLocal=(1,0,0), the
+    // friction code builds forwardWS = up × axle, which comes out to
+    // world/local (0,0,-1) at identity orientation — i.e. a POSITIVE
+    // engineForce pushes the chassis toward LOCAL −Z. The car's nose (head-
+    // lights, hood) is built at local +Z, so a positive engineForce was
+    // actually driving the car tail-first: pressing "forward" moved it
+    // backward and "back" moved it forward — inverted controls, confirmed
+    // with a standalone headless simulation (chassis ended up at z<0 after
+    // a positive engineForce). Removing the negation makes forward input
+    // (throttle<0, see readInput()) produce a negative engineForce, which
+    // the same simulation confirms drives the chassis toward +Z (the nose).
+    const engineForce = throttle * this.maxForce;
     v.applyEngineForce(engineForce, 2);
     v.applyEngineForce(engineForce, 3);
 
@@ -438,6 +462,7 @@ export class Vehicle {
     // Solid structures AND AI traffic dent the car — a moving car should
     // feel just as real a thing to hit as a wall does.
     if (!other.userData || !(other.userData.isBuilding || other.userData.isTraffic)) return;
+    if (this.godMode) return; // admin "god mode" — physics collision still happens, just no cosmetic dent/damage
     const contact = e.contact;
     const impactSpeed = contact.getImpactVelocityAlongNormal ? Math.abs(contact.getImpactVelocityAlongNormal()) : 0;
     if (impactSpeed < DENT_SPEED_THRESHOLD) return;
@@ -509,6 +534,19 @@ export class Vehicle {
     this.vehicle.removeFromWorld(this.world); // this also removes chassisBody itself, per cannon-es's own addToWorld/removeFromWorld pairing
     scene.remove(this.group);
     for (const w of this.wheelMeshes) scene.remove(w);
+  }
+
+  /**
+   * Toggle the headlights (H key in main.js). Turns off both the actual
+   * SpotLight (so it stops lighting the road/other cars) and dims the lamp
+   * mesh's own emissive glow — leaving it fully bright while "off" would
+   * look like the lamp housing itself is lit from within, backwards.
+   */
+  setHeadlightsOn(on) {
+    this._headlightsOn = on;
+    this.headBeam.visible = on;
+    this.lightMat.emissiveIntensity = on ? 3 : 0.15;
+    this.lightMat.emissive.setHex(on ? 0xfff2c0 : 0x2a2418);
   }
 }
 

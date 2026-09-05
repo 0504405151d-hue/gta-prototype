@@ -13,21 +13,39 @@ import { EffectsSystem } from './effects.js';
 import { AudioSystem } from './audio.js';
 import { Network } from './network.js';
 import { TrafficSystem } from './traffic.js';
-import { choice } from './utils.js';
+import { choice, setAnisotropy } from './utils.js';
 import { loadSettings, saveSettings, TRAFFIC_COUNTS } from './settings.js';
 import { WeatherSystem } from './weather.js';
 import { CAR_PRESETS, CAR_COLORS } from './carPresets.js';
+import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 
 const settings = loadSettings();
+
+// Shadow-map resolution per graphics tier — read at boot (city.js's sun is
+// created with this size directly) and again on a live settings change
+// (see graphicsSelectEl below, which disposes and lets the old map
+// regenerate at the new size since a THREE.js shadow map can't just be
+// resized in place once it exists).
+const SHADOW_SIZES = { low: 512, medium: 1024, high: 2048, ultra: 4096 };
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
 const renderer = new THREE.WebGLRenderer({ antialias: settings.graphics !== 'low', powerPreference: 'high-performance' });
+// Anisotropic filtering level for every procedural texture city.js/utils.js
+// builds — has to be set before buildCity() runs below, since textures are
+// generated once at world-build time (see utils.js's setAnisotropy doc).
+setAnisotropy(Math.min(
+  renderer.capabilities.getMaxAnisotropy() || 8,
+  settings.graphics === 'ultra' ? 16 : settings.graphics === 'low' ? 2 : 8
+));
 applyGraphicsSettings(settings.graphics);
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+// Was 1.05 — even after dimming the sun/hemi/ambient lights themselves
+// (city.js), exposure on top of them was still pushing the overall image
+// brighter than intended. Lowered together with those, not instead of them.
+renderer.toneMappingExposure = 0.92;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 renderer.domElement.style.display = 'none';
@@ -46,11 +64,12 @@ pmremGenerator.dispose();
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-// threshold raised from 0.86 — sunlit car paint/glass was crossing that bar
-// and blooming into a solid white patch; 0.94 keeps bloom for actual light
-// sources (headlights, taillights, lit windows) without also flaring every
-// glossy surface that catches the sun.
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.6, 0.94);
+// threshold raised from 0.86→0.94, and now 0.97 — still getting reports of
+// the overall scene reading as too bright, and lowering the lights
+// themselves (city.js) plus exposure (above) only addresses the base image;
+// bloom strength is also nudged down (0.5→0.42) so what DOES cross the
+// threshold (headlights, taillights, lit windows) spreads less aggressively.
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.42, 0.6, 0.97);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -61,15 +80,21 @@ addEventListener('resize', () => {
   composer.setSize(innerWidth, innerHeight);
 });
 
-// Graphics quality setting: pixel ratio cap + shadow map on/off/quality.
-// Antialiasing can only be picked at renderer creation (see above), so a
-// change to "low" mid-session won't retroactively turn it off — everything
-// else here does apply immediately.
+// Graphics quality setting: pixel ratio cap + shadow map on/off/quality/size
+// + texture anisotropy (see setAnisotropy() above — that part only really
+// takes effect at boot, since textures are built once). Antialiasing can
+// only be picked at renderer creation (see above), so a change to "low"
+// mid-session won't retroactively turn it off — everything else here does
+// apply immediately, including "ultra": the highest pixel-ratio cap, the
+// largest shadow map, and soft (PCF) shadow filtering like "high" — it's a
+// real step up in sharpness/shadow resolution on a machine that can afford
+// it, not just a label, though it's still the same engine and lighting
+// model underneath, not a different renderer.
 function applyGraphicsSettings(level) {
-  const pr = level === 'low' ? 1 : level === 'medium' ? Math.min(devicePixelRatio, 1.5) : Math.min(devicePixelRatio, 2);
-  renderer.setPixelRatio(pr);
+  const caps = { low: 1, medium: 1.5, high: 2, ultra: 2.5 };
+  renderer.setPixelRatio(Math.min(devicePixelRatio, caps[level] ?? 2));
   renderer.shadowMap.enabled = level !== 'low';
-  renderer.shadowMap.type = level === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  renderer.shadowMap.type = (level === 'high' || level === 'ultra') ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.shadowMap.needsUpdate = true;
 }
 
@@ -108,7 +133,7 @@ function handleEffect(kind, pos, strength) {
 // World content
 // ---------------------------------------------------------------------------
 setBootProgress(12, 'Строим город…');
-const city = buildCity(THREE, CANNON, world, scene);
+const city = buildCity(THREE, CANNON, world, scene, { shadowMapSize: SHADOW_SIZES[settings.graphics] ?? 2048 });
 
 setBootProgress(40, 'Расставляем разрушаемые объекты…');
 const destructibles = new DestructibleField(THREE, CANNON, world, scene, {
@@ -147,7 +172,32 @@ function buildVehicleAt(spawnPoint, carId) {
 const spawn = choice(city.spawnPoints);
 let car = buildVehicleAt(spawn, selectedCarId);
 
+// Headlights default to on at night, off otherwise — H always lets the
+// player override either way (see readInput()'s keydown handling below).
+let headlightsOn = settings.weather === 'night';
+car.setHeadlightsOn(headlightsOn);
+
+// A hidden, deterministic easter egg — see easterEggs.js for why every
+// player finds it in the same spot.
+const roofUfo = spawnRoofUfo(THREE, scene, city);
+
 setBootProgress(100, 'Готово');
+
+// ---------------------------------------------------------------------------
+// Admin/debug panel (~ key) — local-only conveniences for the player
+// running this client; see index.html's #adminOverlay and destructibles.js's
+// resetField() doc comment for why these don't touch the network.
+// ---------------------------------------------------------------------------
+let godMode = false;
+let turboMode = false;
+
+function applyAdminStateToCar() {
+  car.godMode = godMode;
+  const preset = CAR_PRESETS[selectedCarId] || CAR_PRESETS.sedan;
+  car.maxForce = preset.maxForce * (turboMode ? 2.2 : 1);
+  car.maxBrakeForce = preset.maxBrakeForce * (turboMode ? 2.2 : 1);
+}
+applyAdminStateToCar();
 
 // ---------------------------------------------------------------------------
 // Input
@@ -169,6 +219,12 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') respawnCar();
   if (e.code === 'KeyP') setPaused(!paused);
   if (e.code === 'KeyM') setPhone(!phoneOpen);
+  if (e.code === 'KeyH') {
+    headlightsOn = !headlightsOn;
+    car.setHeadlightsOn(headlightsOn);
+    setNetStatus(headlightsOn ? '💡 Фары включены' : 'Фары выключены');
+  }
+  if (e.code === 'Backquote') setAdmin(!adminOpen);
   if (e.code === 'Enter' && !paused && !phoneOpen) openChat();
   // Esc closes the menu too, but only when it isn't already busy exiting
   // free-fly's pointer lock (that has its own handler right below) — firing
@@ -258,6 +314,53 @@ function sendChatText(text) {
   if (!trimmed) return;
   net.sendChat(trimmed);
   addChatMessage({ id: net.id, name: myName, color: myColor, text: trimmed });
+  triggerEasterEgg(trimmed);
+}
+
+// ---------------------------------------------------------------------------
+// Easter eggs — typing one of these exact words as a chat message triggers a
+// LOCAL-only fun effect for the player who typed it (nothing is sent over
+// the network beyond the chat message itself, which was already going out
+// above). See easterEggs.js for the UFO mesh/flyover.
+// ---------------------------------------------------------------------------
+let activeFlyoverUfo = null;
+let gravityResetTimer = null;
+let partyInterval = null;
+let partyTimer = null;
+
+function triggerMoonGravity() {
+  world.gravity.set(0, -1.6, 0); // roughly the Moon's surface gravity
+  clearTimeout(gravityResetTimer);
+  gravityResetTimer = setTimeout(() => world.gravity.set(0, -9.82, 0), 9000);
+}
+
+function triggerPartyMode() {
+  clearInterval(partyInterval);
+  clearTimeout(partyTimer);
+  partyInterval = setInterval(() => car.bodyMat.color.setHex(choice(CAR_COLORS)), 130);
+  partyTimer = setTimeout(() => {
+    clearInterval(partyInterval);
+    partyInterval = null;
+    car.bodyMat.color.setHex(myColor);
+  }, 9000);
+}
+
+const EASTER_EGGS = {
+  ufo: () => { activeFlyoverUfo = spawnFlyoverUfo(THREE, scene, car.group.position); },
+  нло: () => { activeFlyoverUfo = spawnFlyoverUfo(THREE, scene, car.group.position); },
+  moon: triggerMoonGravity,
+  луна: triggerMoonGravity,
+  party: triggerPartyMode,
+  пати: triggerPartyMode,
+  диско: triggerPartyMode,
+};
+
+function triggerEasterEgg(text) {
+  const fn = EASTER_EGGS[text.trim().toLowerCase()];
+  if (fn) {
+    fn();
+    setNetStatus('✨ Пасхалка: ' + text.trim().toLowerCase());
+  }
 }
 chatInputEl.addEventListener('keydown', (e) => {
   e.stopPropagation();
@@ -360,6 +463,17 @@ volumeRangeEl.addEventListener('input', () => {
 graphicsSelectEl.addEventListener('change', () => {
   settings.graphics = graphicsSelectEl.value;
   applyGraphicsSettings(settings.graphics);
+  // Shadow map resolution can't just change size in place once it exists —
+  // dispose the old one and let three.js regenerate it at the new size on
+  // the next shadow pass.
+  const size = SHADOW_SIZES[settings.graphics] ?? 2048;
+  if (city.sun.shadow.mapSize.width !== size) {
+    city.sun.shadow.mapSize.set(size, size);
+    if (city.sun.shadow.map) {
+      city.sun.shadow.map.dispose();
+      city.sun.shadow.map = null;
+    }
+  }
   saveSettings(settings);
 });
 trafficSelectEl.addEventListener('change', () => {
@@ -390,8 +504,50 @@ document.getElementById('applyCarBtn').addEventListener('click', () => {
   const s = choice(city.spawnPoints);
   car.dispose(scene);
   car = buildVehicleAt(s, newId);
+  car.setHeadlightsOn(headlightsOn);
+  applyAdminStateToCar();
   setPhone(false);
 });
+
+// ---------------------------------------------------------------------------
+// Admin/debug panel (~ key) — see the state vars + applyAdminStateToCar()
+// declared up near where `car` is first built.
+// ---------------------------------------------------------------------------
+let adminOpen = false;
+const adminOverlayEl = document.getElementById('adminOverlay');
+const adminGodEl = document.getElementById('adminGod');
+const adminTurboEl = document.getElementById('adminTurbo');
+
+function setAdmin(v) {
+  adminOpen = v;
+  adminOverlayEl.style.display = v ? 'flex' : 'none';
+  if (v) {
+    adminGodEl.checked = godMode;
+    adminTurboEl.checked = turboMode;
+  }
+}
+adminGodEl.addEventListener('change', () => {
+  godMode = adminGodEl.checked;
+  applyAdminStateToCar();
+});
+adminTurboEl.addEventListener('change', () => {
+  turboMode = adminTurboEl.checked;
+  applyAdminStateToCar();
+});
+document.getElementById('adminTeleportBtn').addEventListener('click', () => {
+  const s = choice(city.spawnPoints);
+  car.respawn({ x: s.x, y: 1.8, z: s.z }, s.heading);
+});
+document.getElementById('adminTrafficBurstBtn').addEventListener('click', () => {
+  traffic.setCount(traffic.cars.length + 10);
+});
+document.getElementById('adminClearTrafficBtn').addEventListener('click', () => {
+  traffic.setCount(0);
+});
+document.getElementById('adminResetPropsBtn').addEventListener('click', () => {
+  destructibles.resetField(city.propSpots);
+});
+document.getElementById('adminCloseBtn').addEventListener('click', () => setAdmin(false));
 
 // ---------------------------------------------------------------------------
 // Free-fly camera: mouse-look (pointer lock) + WASD/QE flight, independent of
@@ -449,7 +605,7 @@ function updateFreeCam(dt) {
 }
 
 function readInput() {
-  if (paused || chatOpen || phoneOpen) return { throttle: 0, steer: 0, brake: 0, handbrake: false };
+  if (paused || chatOpen || phoneOpen || adminOpen) return { throttle: 0, steer: 0, brake: 0, handbrake: false };
 
   // While free-flying, WASD steers the camera instead — the car is still
   // drivable through the arrow keys so it doesn't just sit there.
@@ -476,6 +632,18 @@ function readInput() {
 function respawnCar() {
   const s = choice(city.spawnPoints);
   car.respawn({ x: s.x, y: 1.6, z: s.z }, s.heading);
+}
+
+// Real cars (the local player + every other connected player) for the AI
+// traffic system to brake for, on top of the other traffic cars it already
+// avoids — see traffic.js's update() doc comment for why the tolerances
+// here are wider than the traffic-vs-traffic check.
+function getTrafficObstacles() {
+  const list = [{ x: car.group.position.x, z: car.group.position.z, panicRadius: 3.6, lateral: 3, lookahead: 11 }];
+  for (const rc of remoteCars.values()) {
+    list.push({ x: rc.group.position.x, z: rc.group.position.z, panicRadius: 3.6, lateral: 3, lookahead: 11 });
+  }
+  return list;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +798,8 @@ document.getElementById('startBtn').addEventListener('click', () => {
   saveSettings(settings);
   car.dispose(scene);
   car = buildVehicleAt(spawn, selectedCarId);
+  car.setHeadlightsOn(headlightsOn);
+  applyAdminStateToCar();
   lastTime = performance.now();
   requestAnimationFrame(loop);
 });
@@ -825,10 +995,35 @@ function loop(now) {
   car.setInput(input);
   world.step(FIXED_DT, dt, 5);
   car.update(dt);
+
+  // Safety net for the admin panel's turbo mode stacked with the "moon"
+  // easter egg's low gravity (or any other combination that pushes the
+  // physics tuning outside what it was validated for) — if that ever
+  // leaves the chassis with a non-finite position or flings it somewhere
+  // absurd, auto-respawn instead of leaving the player permanently stuck or
+  // staring at a broken car for the rest of the session. Bounds are
+  // generous (well past the playable city) so this never fires during
+  // normal driving.
+  {
+    const p = car.chassisBody.position;
+    const OUT_OF_BOUNDS = city.cityHalf + 250;
+    const broken = !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z);
+    const lost = Math.abs(p.x) > OUT_OF_BOUNDS || Math.abs(p.z) > OUT_OF_BOUNDS || p.y < -50 || p.y > 400;
+    if (broken || lost) {
+      respawnCar();
+      setNetStatus('Машину занесло куда-то не туда — вернул на респавн');
+    }
+  }
+
   destructibles.update(dt);
   effects.update(dt);
-  traffic.update(dt);
+  traffic.update(dt, getTrafficObstacles());
   weather.update(dt, car.group.position);
+  if (roofUfo) roofUfo.update(dt);
+  if (activeFlyoverUfo) {
+    activeFlyoverUfo.update(dt);
+    if (activeFlyoverUfo.done) activeFlyoverUfo = null;
+  }
   for (const rc of remoteCars.values()) rc.update(dt);
   if (cameraMode === 2) updateFreeCam(dt);
   else updateCamera(dt);

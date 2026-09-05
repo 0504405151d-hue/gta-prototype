@@ -1,5 +1,17 @@
 // Small shared helpers used across client modules.
 
+// Texture anisotropic-filtering level, shared by every buildXTexture() call
+// below. Fixed at 8 before the graphics-quality "ultra" tier existed; now
+// set once at boot (main.js) from the chosen quality + what the GPU actually
+// supports, via setAnisotropy(). Changing it later doesn't retroactively
+// refilter textures already built (same limitation as antialiasing, which
+// also only applies at renderer creation) — good enough for a setting a
+// player picks once before driving rather than mid-session.
+let _anisotropy = 8;
+export function setAnisotropy(v) {
+  _anisotropy = v;
+}
+
 // Deterministic seeded PRNG (mulberry32) so every connected client generates
 // the EXACT same city layout and prop positions/ids without the server having
 // to transmit world geometry. Call resetSeed() once before generating world
@@ -95,7 +107,7 @@ export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', 
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8; // keeps facades from turning into a mushy blur at grazing/distant view angles
+  tex.anisotropy = _anisotropy; // keeps facades from turning into a mushy blur at grazing/distant view angles
   return tex;
 }
 
@@ -159,7 +171,7 @@ export function buildRoadTexture(THREE, { w = 256, h = 256 } = {}) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
+  tex.anisotropy = _anisotropy;
   return tex;
 }
 
@@ -225,6 +237,6 @@ export function buildSidewalkTexture(THREE, { size = 256 } = {}) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
+  tex.anisotropy = _anisotropy;
   return tex;
 }

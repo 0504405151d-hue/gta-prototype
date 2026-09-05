@@ -11,7 +11,7 @@ const GROUND_SEAM_GAP = 0.02; // keeps the road plane from z-fighting with sidew
 const CURB_HEIGHT = 0.18;    // sidewalk slab height — also its real physics curb now
 export const CITY_HALF = (GRID_N * BLOCK_PITCH) / 2;
 
-export function buildCity(THREE, CANNON, world, scene) {
+export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } = {}) {
   resetSeed(1337); // deterministic world: every client builds an identical city + prop layout
   const group = new THREE.Group();
   scene.add(group);
@@ -82,10 +82,17 @@ export function buildCity(THREE, CANNON, world, scene) {
   }
 
   // ---------- Lighting ----------
-  const sun = new THREE.DirectionalLight(0xffd9a8, 1.9); // was 2.4 — combined with glossy clearcoat paint this was clipping to solid white in direct light
+  // Was 2.4, then 1.9 — still reported as "too bright" (glossy clearcoat
+  // paint + the hemisphere/ambient fill below stack on top of this, so the
+  // sun alone wasn't the whole story). Brought all three light sources down
+  // together this time rather than just the sun again: sun 1.9→1.4, hemi
+  // 0.9→0.72, ambient fill 0.35→0.26 — plus the renderer's tone-mapping
+  // exposure in main.js — so overall scene brightness actually drops
+  // instead of just shifting which light source does the overexposing.
+  const sun = new THREE.DirectionalLight(0xffd9a8, 1.4);
   sun.position.set(-140, 120, -80);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
   // Bounds scale with the city (CITY_HALF grew from 119 to 170 with the
   // bigger grid) so the far edge of the map still gets real shadows instead
   // of just going flat/unshadowed past the old, smaller frustum.
@@ -100,10 +107,10 @@ export function buildCity(THREE, CANNON, world, scene) {
   scene.add(sun);
   scene.add(sun.target);
 
-  const hemi = new THREE.HemisphereLight(0x8fa8ff, 0x30261a, 0.9);
+  const hemi = new THREE.HemisphereLight(0x8fa8ff, 0x30261a, 0.72);
   scene.add(hemi);
 
-  const fill = new THREE.AmbientLight(0x404860, 0.35);
+  const fill = new THREE.AmbientLight(0x404860, 0.26);
   scene.add(fill);
 
   // ---------- Ground / roads ----------
@@ -200,7 +207,7 @@ export function buildCity(THREE, CANNON, world, scene) {
       body.userData = { isBuilding: true };
       world.addBody(body);
       buildingBodies.push(body);
-      footprints.push({ x: cx, z: cz, w: bw, d: bd });
+      footprints.push({ x: cx, z: cz, w: bw, d: bd, h: bh });
 
       // A parked car (or two) tucked into the sidewalk margin along a
       // building edge — cheap "lived-in city" detail, and a solid obstacle

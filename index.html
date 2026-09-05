@@ -106,6 +106,13 @@
   .settingRow .checkboxRow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
   #phonePageMap { align-items: center; justify-content: center; }
   #phoneMapCanvas { border-radius: 10px; background: rgba(255,255,255,.03); }
+
+  /* Admin/debug panel (~ key) */
+  #adminOverlay { position: fixed; inset: 0; background: rgba(3,5,10,.72); z-index: 27; display: none; align-items: center; justify-content: center; }
+  #adminOverlay .card { background: #0c1120; border: 1px solid #232b45; padding: 26px 32px; border-radius: 16px; width: 320px; max-width: 90vw; color: #dfe6ff; }
+  #adminOverlay h1 { font-size: 16px; margin: 0 0 4px; text-align: center; }
+  #adminOverlay .sub { font-size: 11px; opacity: .55; text-align: center; margin-bottom: 16px; }
+  #adminOverlay .checkboxRow { margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -118,7 +125,7 @@
 <div id="startOverlay" style="display:none">
   <div class="card">
     <h1>City Drive — Multiplayer</h1>
-    <p>Управление: <b>WASD/стрелки</b> — газ/руль, <b>Пробел</b> — ручник, <b>C</b> — смена камеры (3-я — свободная), <b>R</b> — respawn, <b>Enter</b> — чат, <b>M</b> — телефон.<br/>
+    <p>Управление: <b>WASD/стрелки</b> — газ/руль, <b>Пробел</b> — ручник, <b>C</b> — смена камеры (3-я — свободная), <b>R</b> — respawn, <b>Enter</b> — чат, <b>M</b> — телефон, <b>H</b> — фары, <b>~</b> — админ-панель.<br/>
     В свободной камере: мышь — обзор, <b>WASD</b> — полёт, <b>Q/E</b> — высота, <b>Shift</b> — ускорение, машина едет стрелками.<br/>
     Врезайся в бочки, конусы и заборы, в другие машины и в трафик — всё физическое.</p>
     <div id="carPicker">
@@ -153,7 +160,7 @@
   <div id="chatInputWrap" style="display:none">
     <input id="chatInput" maxlength="140" placeholder="Сообщение… (Enter — отправить, Esc — отмена)" />
   </div>
-  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню &nbsp; <b>Enter</b> чат &nbsp; <b>M</b> телефон</div>
+  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню &nbsp; <b>Enter</b> чат &nbsp; <b>M</b> телефон &nbsp; <b>H</b> фары &nbsp; <b>~</b> админ-панель</div>
   <div id="netStatus" style="display:none"></div>
 </div>
 
@@ -169,6 +176,7 @@
       <b>C</b> — камера (погоня → ближняя → свободная)<br/>
       В свободной камере: мышь — обзор, WASD — полёт, Q/E — высота, Shift — ускорение<br/>
       <b>R</b> — respawn &nbsp;·&nbsp; <b>Enter</b> — чат &nbsp;·&nbsp; <b>M</b> — телефон<br/>
+      <b>H</b> — фары &nbsp;·&nbsp; <b>~</b> — админ-панель<br/>
       <b>P</b> / <b>Esc</b> — это меню
     </div>
   </div>
@@ -201,6 +209,7 @@
             <option value="low">Низкая</option>
             <option value="medium">Средняя</option>
             <option value="high" selected>Высокая</option>
+            <option value="ultra">Ультра</option>
           </select>
         </div>
         <div class="settingRow">
@@ -242,6 +251,20 @@
         <canvas id="phoneMapCanvas" width="280" height="280"></canvas>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="adminOverlay">
+  <div class="card">
+    <h1>Админ-панель ⚙️</h1>
+    <div class="sub">клавиша ~ — открыть/закрыть</div>
+    <div class="checkboxRow"><input type="checkbox" id="adminGod" /> <label style="margin:0">Бог-режим (без вмятин и урона)</label></div>
+    <div class="checkboxRow" style="margin-bottom:16px"><input type="checkbox" id="adminTurbo" /> <label style="margin:0">Турбо (×2.2 мощности и тормоза)</label></div>
+    <button class="menuBtn" id="adminTeleportBtn">🚀 Телепорт в случайную точку</button>
+    <button class="menuBtn" id="adminTrafficBurstBtn">🚗 Добавить 10 машин трафика</button>
+    <button class="menuBtn" id="adminClearTrafficBtn">🧹 Убрать весь трафик</button>
+    <button class="menuBtn" id="adminResetPropsBtn">📦 Восстановить разрушаемые объекты</button>
+    <button class="menuBtn primary" id="adminCloseBtn">Закрыть</button>
   </div>
 </div>
 
