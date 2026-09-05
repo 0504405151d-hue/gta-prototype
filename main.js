@@ -42,7 +42,11 @@ pmremGenerator.dispose();
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.6, 0.86);
+// threshold raised from 0.86 — sunlit car paint/glass was crossing that bar
+// and blooming into a solid white patch; 0.94 keeps bloom for actual light
+// sources (headlights, taillights, lit windows) without also flaring every
+// glossy surface that catches the sun.
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.6, 0.94);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -121,10 +125,40 @@ addEventListener('keydown', (e) => {
     else exitFreeCam();
   }
   if (e.code === 'KeyR') respawnCar();
+  if (e.code === 'KeyP') setPaused(!paused);
+  // Esc closes the menu too, but only when it isn't already busy exiting
+  // free-fly's pointer lock (that has its own handler right below) — firing
+  // both at once would just reopen the menu the instant free-cam drops out.
+  if (e.code === 'Escape' && !freeCam.active) setPaused(!paused);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 
 let cameraMode = 0; // 0 = chase, 1 = close chase, 2 = free-fly
+
+// ---------------------------------------------------------------------------
+// Pause menu — an overlay on top of the HUD, not a real engine pause: physics/
+// networking/rendering all keep running (so multiplayer never drifts out of
+// sync while it's open), only the local car's own input is zeroed out below.
+// ---------------------------------------------------------------------------
+let paused = false;
+const pauseMenuEl = document.getElementById('pauseMenu');
+const muteBtnEl = document.getElementById('muteBtn');
+
+function setPaused(v) {
+  paused = v;
+  pauseMenuEl.style.display = v ? 'flex' : 'none';
+}
+
+document.getElementById('menuHintBtn').addEventListener('click', () => setPaused(!paused));
+document.getElementById('resumeBtn').addEventListener('click', () => setPaused(false));
+document.getElementById('menuRespawnBtn').addEventListener('click', () => {
+  respawnCar();
+  setPaused(false);
+});
+muteBtnEl.addEventListener('click', () => {
+  const muted = audio.toggleMute();
+  muteBtnEl.textContent = muted ? '🔇 Звук: выкл' : '🔊 Звук: вкл';
+});
 
 // ---------------------------------------------------------------------------
 // Free-fly camera: mouse-look (pointer lock) + WASD/QE flight, independent of
@@ -182,6 +216,8 @@ function updateFreeCam(dt) {
 }
 
 function readInput() {
+  if (paused) return { throttle: 0, steer: 0, brake: 0, handbrake: false };
+
   // While free-flying, WASD steers the camera instead — the car is still
   // drivable through the arrow keys so it doesn't just sit there.
   const useWasdForDriving = cameraMode !== 2;
@@ -361,6 +397,16 @@ function updateCamera(dt) {
   camera.lookAt(camTarget);
 }
 
+// Heading (yaw) extracted straight from the car's quaternion — shared by the
+// skid marks, minimap arrow and compass strip so it's only derived once.
+function getCarYaw() {
+  const q = car.group.quaternion;
+  return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+}
+
+// Upper bound used only to normalize the HUD speed gauge's ring fill (0..1).
+const SPEED_GAUGE_MAX_KMH = 180;
+
 // ---------------------------------------------------------------------------
 // Skid marks / dust / screech — reads cannon-es's own per-wheel slip state
 // off the car (see Vehicle.getWheelSkidStates) rather than guessing from
@@ -375,15 +421,65 @@ function updateSkidFx(dt, speedKmh) {
     if (!w.inContact) continue;
     maxSkid = Math.max(maxSkid, w.skidAmount);
     if (w.skidding && speedKmh > 8 && skidTick % 2 === 0) {
-      const yaw = Math.atan2(
-        2 * (car.group.quaternion.w * car.group.quaternion.y + car.group.quaternion.x * car.group.quaternion.z),
-        1 - 2 * (car.group.quaternion.y * car.group.quaternion.y + car.group.quaternion.x * car.group.quaternion.x)
-      );
-      effects.addSkidMark(w.position, yaw);
+      effects.addSkidMark(w.position, getCarYaw());
       if (skidTick % 6 === 0) effects.spawnDust({ x: w.position.x, y: w.position.y + 0.1, z: w.position.z }, 1);
     }
   }
   audio.updateScreech(maxSkid > 0.15 ? maxSkid : 0);
+}
+
+// ---------------------------------------------------------------------------
+// Compass strip — a horizontally-scrolling heading tape (N/E/S/W + degree
+// ticks) centered on the car's current heading, drawn fresh each frame.
+// ---------------------------------------------------------------------------
+const compassCanvas = document.getElementById('compass');
+const cpCtx = compassCanvas ? compassCanvas.getContext('2d') : null;
+const CP_W = compassCanvas ? compassCanvas.width : 0;
+const CP_H = compassCanvas ? compassCanvas.height : 0;
+const CP_PX_PER_DEG = 2.1;
+const COMPASS_LABELS = [
+  { deg: 0, label: 'N' }, { deg: 45, label: 'СВ' }, { deg: 90, label: 'E' },
+  { deg: 135, label: 'ЮВ' }, { deg: 180, label: 'S' }, { deg: 225, label: 'ЮЗ' },
+  { deg: 270, label: 'W' }, { deg: 315, label: 'СЗ' },
+];
+function drawCompass() {
+  if (!cpCtx) return;
+  const headingDeg = ((-getCarYaw() * 180) / Math.PI + 360) % 360;
+  cpCtx.clearRect(0, 0, CP_W, CP_H);
+  cpCtx.save();
+  cpCtx.beginPath();
+  cpCtx.rect(0, 0, CP_W, CP_H);
+  cpCtx.clip();
+
+  cpCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+  cpCtx.fillStyle = 'rgba(255,255,255,0.85)';
+  cpCtx.font = '11px -apple-system, Segoe UI, Roboto, sans-serif';
+  cpCtx.textAlign = 'center';
+
+  for (let deg = -360; deg <= 720; deg += 15) {
+    let diff = deg - headingDeg;
+    diff = ((diff + 180) % 360 + 360) % 360 - 180; // shortest signed diff, wraps at ±360
+    const x = CP_W / 2 + diff * CP_PX_PER_DEG;
+    if (x < -20 || x > CP_W + 20) continue;
+    const norm = ((deg % 360) + 360) % 360;
+    const major = COMPASS_LABELS.find((l) => l.deg === norm);
+    const tickH = major ? 10 : 5;
+    cpCtx.beginPath();
+    cpCtx.moveTo(x, CP_H - tickH);
+    cpCtx.lineTo(x, CP_H);
+    cpCtx.stroke();
+    if (major) cpCtx.fillText(major.label, x, CP_H - 13);
+  }
+
+  cpCtx.restore();
+  // center marker (current heading)
+  cpCtx.fillStyle = '#22d3ee';
+  cpCtx.beginPath();
+  cpCtx.moveTo(CP_W / 2 - 4, 2);
+  cpCtx.lineTo(CP_W / 2 + 4, 2);
+  cpCtx.lineTo(CP_W / 2, 8);
+  cpCtx.closePath();
+  cpCtx.fill();
 }
 
 // ---------------------------------------------------------------------------
@@ -423,10 +519,7 @@ function drawMinimap() {
   }
 
   // local player as a heading-oriented arrow, always centered
-  const yaw = Math.atan2(
-    2 * (car.group.quaternion.w * car.group.quaternion.y + car.group.quaternion.x * car.group.quaternion.z),
-    1 - 2 * (car.group.quaternion.y * car.group.quaternion.y + car.group.quaternion.x * car.group.quaternion.x)
-  );
+  const yaw = getCarYaw();
   const cx = MM_SIZE / 2, cz = MM_SIZE / 2;
   mmCtx.save();
   mmCtx.translate(cx, cz);
@@ -468,6 +561,7 @@ function loop(now) {
   audio.updateEngine(car.chassisBody.velocity.length(), Math.abs(input.throttle));
   updateSkidFx(dt, speedKmh);
   drawMinimap();
+  drawCompass();
 
   // network: send our transform ~20Hz
   netAccum += dt;
@@ -479,6 +573,8 @@ function loop(now) {
   for (const hit of destructibles.drainHits()) net.sendHit(hit);
 
   document.getElementById('speedVal').textContent = Math.round(speedKmh);
+  const speedGaugeEl = document.getElementById('speedGauge');
+  if (speedGaugeEl) speedGaugeEl.style.setProperty('--pct', Math.min(1, speedKmh / SPEED_GAUGE_MAX_KMH));
 
   composer.render();
 }

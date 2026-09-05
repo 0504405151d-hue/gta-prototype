@@ -27,6 +27,14 @@ export class AudioSystem {
     const ctx = new Ctx();
     this.ctx = ctx;
 
+    // Everything routes through this so the HUD mute toggle is one gain
+    // change instead of silencing three independent sound paths.
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = 1;
+    masterGain.connect(ctx.destination);
+    this.masterGain = masterGain;
+    this.muted = false;
+
     // --- shared noise buffer used for screech + impact thuds ---
     const bufLen = ctx.sampleRate * 2;
     const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
@@ -43,7 +51,7 @@ export class AudioSystem {
     engineFilter.frequency.value = 500;
     const engineGain = ctx.createGain();
     engineGain.gain.value = 0.0;
-    engineOsc.connect(engineFilter).connect(engineGain).connect(ctx.destination);
+    engineOsc.connect(engineFilter).connect(engineGain).connect(masterGain);
     engineOsc.start();
     this.engineOsc = engineOsc;
     this.engineFilter = engineFilter;
@@ -59,7 +67,7 @@ export class AudioSystem {
     screechFilter.Q.value = 0.7;
     const screechGain = ctx.createGain();
     screechGain.gain.value = 0;
-    screechSrc.connect(screechFilter).connect(screechGain).connect(ctx.destination);
+    screechSrc.connect(screechFilter).connect(screechGain).connect(masterGain);
     screechSrc.start();
     this.screechGain = screechGain;
 
@@ -98,8 +106,15 @@ export class AudioSystem {
     const vol = 0.15 + strength * 0.5;
     gain.gain.setValueAtTime(vol, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
-    src.connect(filter).connect(gain).connect(ctx.destination);
+    src.connect(filter).connect(gain).connect(this.masterGain);
     src.start();
     src.stop(ctx.currentTime + 0.3);
+  }
+
+  /** Toggles master volume; returns the new muted state. Safe before resume(). */
+  toggleMute() {
+    this.muted = !this.muted;
+    if (this.masterGain) this.masterGain.gain.setTargetAtTime(this.muted ? 0 : 1, this.ctx.currentTime, 0.05);
+    return this.muted;
   }
 }

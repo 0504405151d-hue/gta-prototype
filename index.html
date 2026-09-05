@@ -10,9 +10,24 @@
 
   #hud { position: fixed; inset: 0; pointer-events: none; color: #eaf0ff; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
 
-  #speed { position: absolute; right: 24px; bottom: 24px; text-align: right; }
-  #speed .val { font-size: 54px; font-weight: 700; line-height: 1; }
-  #speed .unit { font-size: 14px; opacity: .7; letter-spacing: 2px; }
+  #speed { position: absolute; right: 24px; bottom: 24px; }
+  #speedGauge {
+    --pct: 0;
+    width: 128px; height: 128px; border-radius: 50%; box-sizing: border-box; padding: 7px;
+    background: conic-gradient(#22d3ee calc(var(--pct) * 1turn), rgba(255,255,255,.1) 0);
+    box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  }
+  #speedGaugeInner {
+    width: 100%; height: 100%; border-radius: 50%; background: rgba(8,11,20,.72);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 1px solid rgba(255,255,255,.08);
+  }
+  #speed .val { font-size: 40px; font-weight: 700; line-height: 1; }
+  #speed .unit { font-size: 11px; opacity: .7; letter-spacing: 2px; margin-top: 2px; }
+  #gearHint { font-size: 10px; opacity: .55; margin-top: 2px; letter-spacing: 1px; }
+
+  #compassWrap { position: absolute; left: 50%; top: 16px; transform: translateX(-50%); }
+  #compass { display: block; border-radius: 8px; background: rgba(10,14,24,.45); backdrop-filter: blur(4px); }
 
   #players { position: absolute; left: 20px; top: 20px; font-size: 13px; background: rgba(10,14,24,.45); border-radius: 10px; padding: 10px 14px; min-width: 150px; backdrop-filter: blur(4px); }
   #players h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; opacity: .7; }
@@ -39,6 +54,18 @@
   #startOverlay button { background: linear-gradient(135deg,#3b82f6,#22d3ee); border: none; color: #04101f; font-weight: 700; padding: 12px 26px; border-radius: 10px; font-size: 14px; cursor: pointer; }
   #startOverlay button:hover { filter: brightness(1.08); }
   #startOverlay input { width: 100%; box-sizing: border-box; margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid #2a3352; background: #0a0f1e; color: #eaf0ff; font-size: 14px; }
+
+  #pauseMenu { position: fixed; inset: 0; background: rgba(3,5,10,.72); z-index: 25; display: none; align-items: center; justify-content: center; }
+  #pauseMenu .card { background: #0c1120; border: 1px solid #232b45; padding: 26px 32px; border-radius: 16px; width: 320px; max-width: 90vw; color: #dfe6ff; }
+  #pauseMenu h1 { font-size: 19px; margin: 0 0 16px; text-align: center; }
+  #pauseMenu .menuBtn { display: block; width: 100%; box-sizing: border-box; background: #161d33; border: 1px solid #2a3352; color: #eaf0ff; font-weight: 600; padding: 11px 16px; border-radius: 10px; font-size: 14px; cursor: pointer; margin-bottom: 10px; text-align: left; }
+  #pauseMenu .menuBtn:hover { background: #1d2542; }
+  #pauseMenu .menuBtn.primary { background: linear-gradient(135deg,#3b82f6,#22d3ee); color: #04101f; border: none; text-align: center; }
+  #pauseMenu .menuBtn.primary:hover { filter: brightness(1.08); }
+  #pauseMenu .controlsList { font-size: 12px; line-height: 1.7; opacity: .8; margin: 14px 0 4px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.1); }
+
+  #menuHintBtn { position: absolute; right: 20px; top: 190px; pointer-events: auto; background: rgba(10,14,24,.45); border: 1px solid rgba(255,255,255,.14); color: #eaf0ff; font-size: 12px; padding: 7px 12px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(4px); }
+  #menuHintBtn:hover { background: rgba(20,26,42,.6); }
 </style>
 </head>
 <body>
@@ -60,15 +87,39 @@
 </div>
 
 <div id="hud" style="display:none">
-  <div id="speed"><span class="val" id="speedVal">0</span><br/><span class="unit">км/ч</span></div>
+  <div id="speed">
+    <div id="speedGauge">
+      <div id="speedGaugeInner">
+        <span class="val" id="speedVal">0</span>
+        <span class="unit">км/ч</span>
+      </div>
+    </div>
+  </div>
   <div id="players">
     <h3>Игроки онлайн</h3>
     <div id="playerList"></div>
     <div id="pingRow">Пинг: <span id="ping">—</span></div>
   </div>
   <div id="minimapWrap"><canvas id="minimap" width="160" height="160"></canvas></div>
-  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn</div>
+  <div id="compassWrap"><canvas id="compass" width="220" height="30"></canvas></div>
+  <button id="menuHintBtn" title="Пауза / меню (P)">☰ Меню (P)</button>
+  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню</div>
   <div id="netStatus" style="display:none"></div>
+</div>
+
+<div id="pauseMenu">
+  <div class="card">
+    <h1>Пауза</h1>
+    <button class="menuBtn primary" id="resumeBtn">Продолжить</button>
+    <button class="menuBtn" id="menuRespawnBtn">Respawn</button>
+    <button class="menuBtn" id="muteBtn">🔊 Звук: вкл</button>
+    <div class="controlsList">
+      <b>WASD/стрелки</b> — газ/руль &nbsp;·&nbsp; <b>Space</b> — ручник<br/>
+      <b>C</b> — камера (погоня → ближняя → свободная)<br/>
+      В свободной камере: мышь — обзор, WASD — полёт, Q/E — высота, Shift — ускорение<br/>
+      <b>R</b> — respawn &nbsp;·&nbsp; <b>P</b> / <b>Esc</b> — это меню
+    </div>
+  </div>
 </div>
 
 <script type="importmap">

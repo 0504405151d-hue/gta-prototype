@@ -119,12 +119,18 @@ export class Vehicle {
     // clearcoat models — combined with the studio environment map (see
     // main.js) this is what turns the body from "flat colored plastic" into
     // something that actually looks like painted sheet metal.
+    // clearcoatRoughness was 0.12 (near-mirror) — under the sun's direct
+    // light that concentrated into a tiny, extremely bright specular point
+    // that bloom then blew up into a solid white patch covering the car.
+    // Softening it spreads that highlight into a normal glossy sheen instead
+    // of a hotspot, which is what actually reads as "paint in the sun"
+    // rather than "camera flash".
     const bodyMat = new THREE.MeshPhysicalMaterial({
-      color, roughness: 0.32, metalness: 0.7, clearcoat: 1, clearcoatRoughness: 0.12, envMapIntensity: 1.1,
+      color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32, envMapIntensity: 1.0,
     });
     this.bodyMat = bodyMat;
     const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0a1018, roughness: 0.06, metalness: 0.15, clearcoat: 0.6, envMapIntensity: 1.4,
+      color: 0x0a1018, roughness: 0.1, metalness: 0.15, clearcoat: 0.5, clearcoatRoughness: 0.2, envMapIntensity: 1.2,
     });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.5, metalness: 0.75 }); // matte black plastic trim/bumpers
     const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.18, metalness: 0.95 }); // mirrors/exhaust/rim accents
@@ -467,7 +473,7 @@ export class RemoteCar {
   constructor(THREE, scene, color = 0x999999) {
     this.THREE = THREE;
     const group = new THREE.Group();
-    const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.32, metalness: 0.7, clearcoat: 1, clearcoatRoughness: 0.12 });
+    const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32 });
     const base = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.36, 4.2), bodyMat);
     base.position.y = 0.4;
     base.castShadow = true;

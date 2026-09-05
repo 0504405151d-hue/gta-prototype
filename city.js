@@ -79,7 +79,7 @@ export function buildCity(THREE, CANNON, world, scene) {
   }
 
   // ---------- Lighting ----------
-  const sun = new THREE.DirectionalLight(0xffd9a8, 2.4);
+  const sun = new THREE.DirectionalLight(0xffd9a8, 1.9); // was 2.4 — combined with glossy clearcoat paint this was clipping to solid white in direct light
   sun.position.set(-140, 120, -80);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -245,6 +245,9 @@ export function buildCity(THREE, CANNON, world, scene) {
   // streets running north-south, one elongated along X for east-west streets.
   addLaneMarkings(THREE, group, streetCoords, GROUND_SEAM_GAP);
 
+  // ---------- Crosswalks at every intersection ----------
+  addCrosswalks(THREE, group, streetCoords, GROUND_SEAM_GAP);
+
   // ---------- Spawn points (center plaza roads) ----------
   for (let k = 0; k < 8; k++) {
     const angle = (k / 8) * Math.PI * 2;
@@ -304,7 +307,7 @@ function addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz) {
 
   const w = 1.9, h = 1.35, l = 4.2;
   const color = choice(PARKED_CAR_COLORS);
-  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.32, metalness: 0.7, clearcoat: 1, clearcoatRoughness: 0.15 });
+  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32 });
   const car = new THREE.Group();
   const base = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.5, l), bodyMat);
   base.position.y = h * 0.32;
@@ -375,6 +378,63 @@ function addLaneMarkings(THREE, group, streetCoords, groundSeamGap) {
       instEW.setMatrixAt(countEW++, m);
     }
   }
+  instEW.count = countEW;
+  instEW.instanceMatrix.needsUpdate = true;
+
+  group.add(instNS, instEW);
+}
+
+// Zebra crossings on all four approaches of every street intersection. Real
+// stripes (not a baked texture) so they stay crisp up close and correctly
+// oriented regardless of which of the two street directions they belong to:
+// a batch elongated along Z (repeated across X) for streets running
+// north-south, and one elongated along X (repeated across Z) for east-west
+// streets — same idea as addLaneMarkings(), just perpendicular to it.
+function addCrosswalks(THREE, group, streetCoords, groundSeamGap) {
+  const bandDepth = 3.0;       // how far the striped band extends along the direction of travel
+  const stripeW = 0.45;        // width of each stripe, and the gap between them
+  const stripeGap = 0.4;
+  const crossHalf = ROAD_HALF_WIDTH * 0.82; // stay shy of the curb edges
+  const y = groundSeamGap + 0.015; // same height as lane dashes — they never overlap spatially
+
+  const mat = new THREE.MeshStandardMaterial({ color: 0xe9e6dc, roughness: 0.65, metalness: 0.02 });
+  const geoAlongZ = new THREE.BoxGeometry(stripeW, 0.02, bandDepth); // stripe parallel to N-S travel, repeated across X
+  const geoAlongX = new THREE.BoxGeometry(bandDepth, 0.02, stripeW); // stripe parallel to E-W travel, repeated across Z
+
+  const stripesPerBand = Math.max(3, Math.floor((crossHalf * 2) / (stripeW + stripeGap)));
+  const bandsPerIntersection = 2; // one band on each side of the street (before/after the crossing)
+  const maxCount = streetCoords.length * streetCoords.length * bandsPerIntersection * stripesPerBand;
+  const instNS = new THREE.InstancedMesh(geoAlongZ, mat, maxCount); // crosswalks over north-south streets
+  const instEW = new THREE.InstancedMesh(geoAlongX, mat, maxCount); // crosswalks over east-west streets
+  instNS.receiveShadow = true;
+  instEW.receiveShadow = true;
+
+  const m = new THREE.Matrix4();
+  let countNS = 0, countEW = 0;
+  const offsets = [];
+  const span = (stripesPerBand - 1) * (stripeW + stripeGap);
+  for (let s = 0; s < stripesPerBand; s++) offsets.push(-span / 2 + s * (stripeW + stripeGap));
+
+  for (const ix of streetCoords) {
+    for (const iz of streetCoords) {
+      // Crossing the north-south street (band sits just south, then just north, of this intersection)
+      for (const sideZ of [iz - ROAD_HALF_WIDTH - bandDepth / 2, iz + ROAD_HALF_WIDTH + bandDepth / 2]) {
+        for (const off of offsets) {
+          m.makeTranslation(ix + off, y, sideZ);
+          instNS.setMatrixAt(countNS++, m);
+        }
+      }
+      // Crossing the east-west street (band sits just west, then just east, of this intersection)
+      for (const sideX of [ix - ROAD_HALF_WIDTH - bandDepth / 2, ix + ROAD_HALF_WIDTH + bandDepth / 2]) {
+        for (const off of offsets) {
+          m.makeTranslation(sideX, y, iz + off);
+          instEW.setMatrixAt(countEW++, m);
+        }
+      }
+    }
+  }
+  instNS.count = countNS;
+  instNS.instanceMatrix.needsUpdate = true;
   instEW.count = countEW;
   instEW.instanceMatrix.needsUpdate = true;
 
