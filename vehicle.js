@@ -7,6 +7,8 @@
 // points/speeds against buildings, and per-wheel skid state (from cannon-es's
 // own tire slip model) that main.js uses to trigger skid marks/dust/sound.
 
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
 export const WHEEL_RADIUS = 0.36;
 
 const DENT_RADIUS = 0.85;
@@ -14,6 +16,28 @@ const DENT_MAX_PUSH = 0.22;
 const DENT_SPEED_THRESHOLD = 3.2;
 const CHASSIS_Y_OFFSET = 0.4; // how far the collision box sits above the body origin (wheel-mount height)
 const ANTI_ROLL_STIFFNESS = 9000; // empirically tuned in a headless test — see fix notes below
+// Hard velocity cap (~230 km/h) — mainly there for the admin panel's turbo
+// mode (2.2x engine force with no matching cap before this): ramming a wall
+// at an unbounded turbo speed could keep re-triggering hard collisions every
+// single physics step (the chassis re-entering the wall each frame faster
+// than friction/contact response could fully arrest it), which is exactly
+// the kind of runaway collision spam that overwhelmed this project's own
+// smoke test (see IMPACT_EFFECT_COOLDOWN below for the other half of that
+// fix). Bounding top speed keeps any single collision's energy sane
+// regardless of what multiplies engineForce.
+const MAX_SPEED_MS = 65;
+// A car stuck jittering against a wall (turbo ramming it, or any other
+// stuck state) can generate a hard 'collide' event on every physics
+// sub-step. Denting/crumpling every one of those is cheap and fine — it's
+// onEffect() that isn't: it drives audio.playImpact(), which allocates a
+// fresh set of Web Audio nodes per call with zero throttling. Uncapped,
+// dozens of impacts per second flooded the audio graph and stalled the
+// (already CPU-constrained, software-rendered) test browser hard enough
+// that Chromium's own hang watchdog killed the tab outright — caught by
+// this project's own smoke test, not guessed at. This cooldown doesn't
+// touch the dent/crumple visuals at all, only how often the sound+particle
+// side of a hit is allowed to re-fire.
+const IMPACT_EFFECT_COOLDOWN = 0.09;
 
 /**
  * Fix for a real flip-prone-car bug, found by reading cannon-es's own source
@@ -132,15 +156,20 @@ export class Vehicle {
     // Softening it spreads that highlight into a normal glossy sheen instead
     // of a hotspot, which is what actually reads as "paint in the sun"
     // rather than "camera flash".
+    // Round-3 follow-up ("уменьши блики" — still too much glare): pushed
+    // clearcoat/clearcoatRoughness/envMapIntensity down another notch across
+    // every car material in the project (player, remote players, traffic,
+    // parked cars) — the previous pass tamed the single worst hotspot but
+    // the paint was still noticeably mirror-like in direct sun.
     const bodyMat = new THREE.MeshPhysicalMaterial({
-      color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32, envMapIntensity: 1.0,
+      color, roughness: 0.42, metalness: 0.6, clearcoat: 0.7, clearcoatRoughness: 0.5, envMapIntensity: 0.55,
     });
     this.bodyMat = bodyMat;
     const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0a1018, roughness: 0.1, metalness: 0.15, clearcoat: 0.5, clearcoatRoughness: 0.2, envMapIntensity: 1.2,
+      color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6,
     });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.5, metalness: 0.75 }); // matte black plastic trim/bumpers
-    const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.18, metalness: 0.95 }); // mirrors/exhaust/rim accents
+    const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.3, metalness: 0.9 }); // mirrors/exhaust/rim accents (roughened — was near-mirror chrome)
 
     const baseGeo = new THREE.BoxGeometry(chassisW, chassisH * 0.55, chassisL, 3, 2, 6);
     const base = new THREE.Mesh(baseGeo, bodyMat);
@@ -167,6 +196,12 @@ export class Vehicle {
     hood.rotation.x = -0.14; // dips toward the front bumper
     hood.castShadow = true;
     group.add(hood);
+    // Kept as instance fields (with their untouched base pose) so damage
+    // crumple (see _applyCrumple() below) can nudge them per-frame without
+    // fighting a running total — every crumple write is relative to this
+    // original pose, not to whatever the last frame left it at.
+    this.hoodMesh = hood;
+    this._hoodBase = { y: hood.position.y, rotX: hood.rotation.x };
 
     const windshieldLen = chassisL * 0.17;
     const windshieldZ = chassisL / 2 - hoodLen - 0.2 - windshieldLen * 0.32;
@@ -195,15 +230,40 @@ export class Vehicle {
     trunk.rotation.x = 0.12;
     trunk.castShadow = true;
     group.add(trunk);
+    this.trunkMesh = trunk;
+    this._trunkBase = { y: trunk.position.y, rotX: trunk.rotation.x };
 
     // Bumper strips — bottom-front/rear accents that break up the slab body
     // and read as a distinct plastic bumper rather than one flat painted box.
     const frontBumper = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.98, 0.18, 0.3), trimMat);
     frontBumper.position.set(0, 0.24, chassisL / 2 - 0.18);
     group.add(frontBumper);
+    this.frontBumperMesh = frontBumper;
+    this._frontBumperBase = { z: frontBumper.position.z, rotX: frontBumper.rotation.x };
     const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.98, 0.18, 0.3), trimMat);
     rearBumper.position.set(0, 0.24, -chassisL / 2 + 0.18);
     group.add(rearBumper);
+    this.rearBumperMesh = rearBumper;
+    this._rearBumperBase = { z: rearBumper.position.z, rotX: rearBumper.rotation.x };
+
+    // Front grille — a small dark slat between the headlights so the nose
+    // isn't just one blank painted panel.
+    const grille = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.42, 0.14, 0.06), trimMat);
+    grille.position.set(0, 0.42, chassisL / 2 - 0.02);
+    group.add(grille);
+
+    // Door seam lines — thin dark strips sitting almost flush on each side,
+    // roughly where a real door split would be. Cheap (4 thin boxes) but
+    // it's the difference between "one smooth slab" and "a paneled car"
+    // when viewed from the side.
+    const seamMat = new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 0.7, metalness: 0.1 });
+    [-1, 1].forEach((side) => {
+      [-0.65, 0.55].forEach((z) => {
+        const seam = new THREE.Mesh(new THREE.BoxGeometry(0.02, chassisH * 0.48, 0.03), seamMat);
+        seam.position.set(side * (chassisW / 2 + 0.001), 0.4, z);
+        group.add(seam);
+      });
+    });
 
     // Wing mirrors
     [-1, 1].forEach((side) => {
@@ -271,7 +331,7 @@ export class Vehicle {
     // than one flat-colored cylinder — the single biggest cheap upgrade for
     // "does this look like a real car" on any procedural vehicle.
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.92, metalness: 0.05 });
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0xc7cbd1, roughness: 0.28, metalness: 0.9, envMapIntensity: 1.2 });
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0xc7cbd1, roughness: 0.4, metalness: 0.85, envMapIntensity: 0.6 });
     this.wheelMeshes = [];
     for (let i = 0; i < 4; i++) {
       const wheelGroup = new THREE.Group();
@@ -324,6 +384,20 @@ export class Vehicle {
     // (the car still bounces off things), this only skips the cosmetic
     // dent/damage reaction in _onChassisCollide below.
     this.godMode = false;
+
+    // ---------- Damage state (round-3: "improve car destruction") ----------
+    // The per-vertex dent in _applyDent() below only ever sculpted the flat
+    // base slab. That alone stopped reading as "damage" once a car had taken
+    // a lot of hits — real wrecks visibly sag: the hood/trunk cave in and
+    // droop, the bumpers get shoved in and tilt. frontDamage/rearDamage are
+    // tracked separately (0..1 each) so a car hit only from the front doesn't
+    // show a crumpled trunk too, and _applyCrumple() below reads them to pose
+    // the hood/bumper/trunk meshes directly off their ORIGINAL base pose
+    // (stored above) every time, rather than nudging them repeatedly.
+    this.frontDamage = 0;
+    this.rearDamage = 0;
+    this._smokeTimer = 0;
+    this._lastImpactEffectAt = -Infinity; // see IMPACT_EFFECT_COOLDOWN above
   }
 
   setInput(input) {
@@ -363,6 +437,12 @@ export class Vehicle {
 
     this._applyAntiRoll();
 
+    // Hard top-speed cap — see MAX_SPEED_MS above.
+    const speed = this.chassisBody.velocity.length();
+    if (speed > MAX_SPEED_MS) {
+      this.chassisBody.velocity.scale(MAX_SPEED_MS / speed, this.chassisBody.velocity);
+    }
+
     // Brake lights actually light up under braking instead of sitting at a
     // fixed glow all the time — a small thing, but it's the difference
     // between "a car with red spheres on the back" and a car that reads as
@@ -390,6 +470,41 @@ export class Vehicle {
       // being dragged rather than driven). Just copy the transform as-is.
       mesh.quaternion.copy(t.quaternion);
     }
+
+    // Heavily damaged cars smoke from the engine bay (front damage) or the
+    // trunk (rear damage) — a continuous, ongoing tell that this car is
+    // wrecked, on top of the one-shot spark/dust puff each impact already
+    // gets from _onChassisCollide.
+    const damageLevel = Math.max(this.frontDamage, this.rearDamage);
+    if (damageLevel > 0.55) {
+      this._smokeTimer -= dt;
+      if (this._smokeTimer <= 0) {
+        this._smokeTimer = 0.4 - damageLevel * 0.15;
+        const fromFront = this.frontDamage >= this.rearDamage;
+        const localZ = (fromFront ? 1 : -1) * (this.dims.chassisL / 2 - 0.3);
+        const world = this.group.localToWorld(new this.THREE.Vector3(0, 0.55, localZ));
+        this.onEffect('smoke', { x: world.x, y: world.y, z: world.z }, damageLevel);
+      }
+    }
+  }
+
+  /**
+   * Poses the hood/front-bumper (front damage) and trunk/rear-bumper (rear
+   * damage) off their stored base transform — see the fields set where each
+   * mesh is built above. Called every time frontDamage/rearDamage change so
+   * the visible crumple always matches the current damage total exactly,
+   * instead of drifting from repeated relative nudges.
+   */
+  _applyCrumple() {
+    const f = this.frontDamage, r = this.rearDamage;
+    this.hoodMesh.rotation.x = this._hoodBase.rotX - f * 0.4;
+    this.hoodMesh.position.y = this._hoodBase.y - f * 0.14;
+    this.frontBumperMesh.position.z = this._frontBumperBase.z - f * 0.2;
+    this.frontBumperMesh.rotation.x = this._frontBumperBase.rotX + f * 0.3;
+    this.trunkMesh.rotation.x = this._trunkBase.rotX + r * 0.35;
+    this.trunkMesh.position.y = this._trunkBase.y - r * 0.12;
+    this.rearBumperMesh.position.z = this._rearBumperBase.z + r * 0.2;
+    this.rearBumperMesh.rotation.x = this._rearBumperBase.rotX - r * 0.3;
   }
 
   /**
@@ -451,6 +566,9 @@ export class Vehicle {
     b.velocity.set(0, 0, 0);
     b.angularVelocity.set(0, 0, 0);
     this._resetDents();
+    this.frontDamage = 0;
+    this.rearDamage = 0;
+    this._applyCrumple();
   }
 
   // -------------------------------------------------------------------
@@ -473,7 +591,34 @@ export class Vehicle {
     this.chassisBody.position.vadd(rWorld, worldPoint);
 
     this._applyDent(worldPoint, impactSpeed);
-    this.onEffect('impact', { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z }, Math.min(1, impactSpeed / 10));
+
+    // Directional crumple damage: which end got hit decides whether the
+    // hood/front bumper or the trunk/rear bumper visibly cave in — see
+    // _applyCrumple() and the frontDamage/rearDamage fields above.
+    const localPoint = new this.CANNON.Vec3();
+    this.chassisBody.pointToLocalFrame(worldPoint, localPoint);
+    const dmgInc = Math.min(0.4, impactSpeed / 35);
+    if (localPoint.z >= 0) this.frontDamage = Math.min(1, this.frontDamage + dmgInc);
+    else this.rearDamage = Math.min(1, this.rearDamage + dmgInc);
+    this._applyCrumple();
+
+    // Give the traffic car itself a visible/behavioral reaction (damage
+    // flash + a brief stun) instead of the player's own car being the only
+    // thing that ever shows a hit was taken — see registerHit() in traffic.js.
+    // Not cooldown-gated: it just flips some numbers on a plain object, no
+    // audio/particle allocation, so it's cheap even if it fires every step.
+    if (other.userData.isTraffic && other.userData.trafficRef) {
+      other.userData.trafficRef.registerHit(impactSpeed);
+    }
+
+    // Sound + sparks/dust are cooldown-gated (see IMPACT_EFFECT_COOLDOWN) —
+    // the dent/crumple/traffic-reaction above still applies on every single
+    // qualifying hit, only the audio+particle side is rate-limited.
+    const now = performance.now() / 1000;
+    if (now - this._lastImpactEffectAt >= IMPACT_EFFECT_COOLDOWN) {
+      this._lastImpactEffectAt = now;
+      this.onEffect('impact', { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z }, Math.min(1, impactSpeed / 10));
+    }
   }
 
   _applyDent(worldPoint, speed) {
@@ -562,27 +707,39 @@ export class RemoteCar {
   constructor(THREE, scene, color = 0x999999) {
     this.THREE = THREE;
     const group = new THREE.Group();
-    const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32 });
+    const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.42, metalness: 0.6, clearcoat: 0.7, clearcoatRoughness: 0.5, envMapIntensity: 0.55 });
     const base = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.36, 4.2), bodyMat);
     base.position.y = 0.4;
     base.castShadow = true;
     group.add(base);
     const cabin = new THREE.Mesh(
       new THREE.BoxGeometry(1.56, 0.5, 2.1),
-      new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.06, metalness: 0.15, clearcoat: 0.6 })
+      new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6 })
     );
     cabin.position.set(0, 0.65, -0.15);
     group.add(cabin);
     // Static wheels (no per-wheel telemetry travels over the network for
     // remote players, so these don't spin/steer) — still much better than a
-    // body floating with no wheels at all.
+    // body floating with no wheels at all. Two-tone (tire + rim disc) to
+    // match the player's own wheel treatment instead of one flat cylinder.
     const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.92 });
+    // Rims merged into one mesh (one draw call) rather than four — with
+    // several other players connected this adds up fast under software
+    // rendering; see the same fix (and why) in traffic.js.
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0xc7cbd1, roughness: 0.4, metalness: 0.85, envMapIntensity: 0.6 });
+    const rimGeos = [];
     [[-0.95, 0.35, 1.4], [0.95, 0.35, 1.4], [-0.95, 0.35, -1.4], [0.95, 0.35, -1.4]].forEach(([wx, wy, wz]) => {
       const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14), wheelMat);
       wheel.rotation.z = Math.PI / 2;
       wheel.position.set(wx, wy, wz);
       group.add(wheel);
+      const rGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.3, 12);
+      rGeo.rotateZ(Math.PI / 2);
+      rGeo.translate(wx, wy, wz);
+      rimGeos.push(rGeo);
     });
+    group.add(new THREE.Mesh(mergeGeometries(rimGeos), rimMat));
+    rimGeos.forEach((g) => g.dispose());
     scene.add(group);
     this.group = group;
 

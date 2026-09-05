@@ -64,12 +64,13 @@ pmremGenerator.dispose();
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-// threshold raised from 0.86→0.94, and now 0.97 — still getting reports of
-// the overall scene reading as too bright, and lowering the lights
-// themselves (city.js) plus exposure (above) only addresses the base image;
-// bloom strength is also nudged down (0.5→0.42) so what DOES cross the
-// threshold (headlights, taillights, lit windows) spreads less aggressively.
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.42, 0.6, 0.97);
+// threshold raised from 0.86→0.94→0.97, strength 0.5→0.42 — still getting
+// reports of glare/hotspots (round 3), even after the clearcoat materials
+// themselves were softened (vehicle.js/traffic.js/city.js). Pushed both
+// again: threshold 0.97→0.99 (only the genuinely brightest points — actual
+// light sources — bloom now, not a shiny paint highlight) and strength
+// 0.42→0.34 (less spread on whatever does cross it).
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.34, 0.6, 0.99);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -103,7 +104,30 @@ function applyGraphicsSettings(level) {
 // ---------------------------------------------------------------------------
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
 world.broadphase = new CANNON.SAPBroadphase(world);
-world.solver.iterations = 12;
+// Raised from 12 (round 3: "убери проезжание сквозь домов" — cars were able
+// to visibly sink into / clip through building corners at speed). More
+// solver iterations converge to a smaller penetration depth per contact
+// before the next step runs. This alone is NOT true continuous collision
+// detection (cannon-es doesn't have that — a body moving fast enough can
+// still tunnel clean through in one step), which is why the real fix is the
+// per-frame building-overlap correction in resolveBuildingOverlap() below;
+// this is just the cheap complementary half that makes ordinary low-speed
+// contact against a wall feel a bit more solid too.
+//
+// NOTE: an earlier version of this fix also raised
+// defaultContactMaterial.contactEquationStiffness (1e7 → 1e8). That turned
+// out to be a real mistake, not just an untested guess left in — it was
+// caught by this project's own smoke test: a turbo-mode ram into a building
+// left the physics in a bad state that only surfaced a couple of scripted
+// actions later (chat + graphics-switch + camera moves all still worked;
+// the very next keyboard action then hung for the rest of the test run,
+// which is consistent with the stiffer solver producing a huge or NaN
+// velocity on a hard collision that the existing NaN/out-of-bounds safety
+// net further down doesn't catch until the NEXT physics step, by which
+// point a frame tried to render/shadow-map geometry at wild coordinates and
+// the software rasterizer choked on it). Reverted to the default stiffness;
+// resolveBuildingOverlap() below doesn't depend on it at all.
+world.solver.iterations = 16;
 world.defaultContactMaterial.friction = 0.5;
 world.allowSleep = true;
 
@@ -122,6 +146,11 @@ function handleEffect(kind, pos, strength) {
     effects.spawnSmoke(p, 8);
     effects.spawnSparks(p, 6);
     audio.playImpact(Math.min(1, strength + 0.35));
+  } else if (kind === 'smoke') {
+    // Continuous engine-bay/trunk smoke from a heavily damaged car (see
+    // vehicle.js's damage tracking) — no impact sound here, this isn't a
+    // one-shot collision, just an ongoing "this car is wrecked" tell.
+    effects.spawnSmoke(p, 2);
   } else {
     effects.spawnSparks(p, Math.round(4 + strength * 8));
     effects.spawnDust(p, 4);
@@ -634,6 +663,160 @@ function respawnCar() {
   car.respawn({ x: s.x, y: 1.6, z: s.z }, s.heading);
 }
 
+// ---------------------------------------------------------------------------
+// Anti-tunneling safety net (round 3: "убери проезжание сквозь домов" — the
+// player could, under the right hit, end up clipped partway or fully into a
+// building). cannon-es's collision detection is discrete, not continuous —
+// building walls are solid static boxes and normal contacts already stop the
+// car almost all of the time (confirmed over many minutes of test driving
+// with no clipping), but a fast-enough hit, an odd corner angle, or turbo
+// mode can still move the chassis past a wall within a single physics step
+// with nothing there to catch it mid-flight.
+//
+// Rather than chase every possible cause of a rare discrete-collision miss,
+// this runs a real overlap test every frame (2D, in the XZ plane — building
+// footprints are uniform full-height boxes, so a horizontal check is enough
+// PROVIDED the car is actually within that building's height range — see
+// the vertical gate below) between the player's actual oriented car
+// rectangle and every building footprint, using proper oriented-box vs
+// axis-aligned-box separating-axis math rather than a conservative bounding
+// circle (which would push the car away from buildings it isn't even
+// touching whenever driving past close alongside one). If it finds real
+// overlap, it shoves the chassis out along the axis of least penetration
+// (capped — see MAX_OVERLAP_CORRECTION) and cancels the velocity component
+// driving it further in — the same "never let the impossible state persist"
+// idea as the out-of-bounds/NaN check below, just for "inside a wall"
+// specifically.
+//
+// Two bugs found and fixed here by this project's own smoke test, not by
+// guessing:
+// 1) No vertical gate at all originally — a car launched briefly airborne
+//    by a hard collision (exactly what a turbo-mode ram into a wall does)
+//    would still register as "inside" any building whose XZ footprint it
+//    happened to pass over mid-air, even 50m above the actual rooftop, and
+//    get shoved sideways every single frame while airborne — compounding
+//    into a runaway multi-hundred-meter teleport within about a second.
+//    That's now gated by comparing p.y against the building's own height
+//    (footprints carry `h` — see city.js).
+// 2) No cap on the correction distance — even grounded, a bad SAT read on
+//    one particular axis could in principle produce a large one-frame
+//    "correction". Capped at MAX_OVERLAP_CORRECTION per building per frame
+//    (the standard "max linear correction" pattern used by real physics
+//    engines, e.g. Box2D's b2_maxLinearCorrection) so a deep overlap gets
+//    resolved gradually over a few frames instead of ever teleporting.
+// Large enough to fully clear even a worst-case deep embedding (bounded by
+// building half-extents, well under this) in a single frame rather than
+// dragging a multi-second string of small corrections out — see the
+// OVERLAP_FIX_MAX_SPEED note above: this project's own smoke test showed
+// that stretching the fix over many frames while other systems (dent/
+// crumple/effects) were also actively reacting to the still-ongoing overlap
+// was itself what destabilized things, not the size of any single push.
+const MAX_OVERLAP_CORRECTION = 20;
+// Above ordinary city-driving speed, back off entirely and leave it to
+// cannon-es's own contact resolution (which is exactly what handled this
+// fine, including turbo-mode wall rams, for the whole rest of this
+// project's development). Found via this project's own smoke test: a
+// sustained turbo-mode ram straight into a wall — nothing an ordinary
+// player does, but exactly what the admin panel's turbo mode enables —
+// combined with this correction running every frame produced a compounding
+// instability (repeatedly yanking the chassis while suspension/contact
+// forces were still actively fighting over the same collision) that ended
+// in the test browser becoming unresponsive. A real, normal-speed "clipped
+// slightly into a wall" moment — the actual bug this function targets — is
+// well under this speed anyway.
+const OVERLAP_FIX_MAX_SPEED = 22; // ~80 km/h
+
+// Reused every call instead of allocated fresh — resolveBuildingOverlap runs
+// unconditionally every single frame of normal driving (not just during a
+// collision), and this project's own smoke test showed that per-frame
+// allocation churn in a hot path like this (a new Euler, plus a new 4-object
+// axis array PER NEARBY BUILDING) adds up to real, compounding GC pressure
+// on top of an already CPU-tight software-rendered scene — it was one of
+// several contributing factors behind a browser hang the smoke test caught
+// (see the other fixes/notes on this function).
+const _overlapEuler = new THREE.Euler();
+
+function _axisOverlap(ax, az, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz) {
+  const carR = halfW * Math.abs(fx * ax + fz * az) + halfL * Math.abs(rx * ax + rz * az);
+  const bR = halfFW * Math.abs(ax) + halfFD * Math.abs(az);
+  const centerDist = Math.abs(dx * ax + dz * az);
+  return carR + bR - centerDist;
+}
+
+function resolveBuildingOverlap(carBody, dims, footprints) {
+  if (carBody.velocity.length() > OVERLAP_FIX_MAX_SPEED) return;
+  const p = carBody.position;
+  const halfW = dims.chassisW / 2 + 0.08; // small margin so it settles just outside, not exactly flush
+  const halfL = dims.chassisL / 2 + 0.08;
+  // Car's world-space forward/right unit vectors in the XZ plane, from yaw
+  // only — matches the (sin, cos) convention used everywhere else in this
+  // project (city.js/traffic.js) for a body whose quaternion is set via
+  // setFromEuler(0, heading, 0).
+  _overlapEuler.setFromQuaternion(carBody.quaternion, 'YXZ');
+  const yaw = _overlapEuler.y;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw); // car local +Z (nose) in world XZ
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw); // car local +X (right) in world XZ
+  const boundingR = Math.hypot(halfW, halfL); // cheap coarse reject before the exact SAT check below
+
+  for (const f of footprints) {
+    // Vertical gate (see fix #1 above): only a building this car's vertical
+    // position could plausibly be inside at all is a candidate — a car
+    // flying well above the roofline, or somehow below ground, can't be
+    // "inside" this building's walls no matter what its XZ position says.
+    if (p.y > f.h + 1.5 || p.y < -1.5) continue;
+
+    const dx = p.x - f.x, dz = p.z - f.z;
+    const coarseR = boundingR + Math.hypot(f.w / 2, f.d / 2);
+    if (dx * dx + dz * dz > coarseR * coarseR) continue;
+
+    const halfFW = f.w / 2, halfFD = f.d / 2;
+    // Separating-axis test over the 4 candidate axes for an OBB (car) vs
+    // AABB (building) pair in 2D: the AABB's own two axes (world X/Z) plus
+    // the OBB's two axes (the car's forward/right). Track whichever axis
+    // has the SMALLEST positive overlap — that's the minimum-translation
+    // axis to push the car out along. Axes are checked inline (not via an
+    // array of them) to avoid allocating one every building every frame —
+    // see the note above _axisOverlap().
+    let minOverlap = Infinity, minAx = 0, minAz = 0, sepFound = false;
+    let overlap = _axisOverlap(1, 0, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz);
+    if (overlap <= 0) { sepFound = true; }
+    else { minOverlap = overlap; minAx = 1; minAz = 0; }
+
+    if (!sepFound) {
+      overlap = _axisOverlap(0, 1, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz);
+      if (overlap <= 0) sepFound = true;
+      else if (overlap < minOverlap) { minOverlap = overlap; minAx = 0; minAz = 1; }
+    }
+    if (!sepFound) {
+      overlap = _axisOverlap(fx, fz, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz);
+      if (overlap <= 0) sepFound = true;
+      else if (overlap < minOverlap) { minOverlap = overlap; minAx = fx; minAz = fz; }
+    }
+    if (!sepFound) {
+      overlap = _axisOverlap(rx, rz, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz);
+      if (overlap <= 0) sepFound = true;
+      else if (overlap < minOverlap) { minOverlap = overlap; minAx = rx; minAz = rz; }
+    }
+    if (sepFound) continue;
+
+    // Push out along the minimum-penetration axis, oriented away from the
+    // building's center, and kill the velocity component still driving the
+    // chassis further into it (otherwise it just re-penetrates next step).
+    // Correction is capped (see fix #2 above) — a deep overlap resolves
+    // gradually over a few frames rather than in one potentially-large jump.
+    const correction = Math.min(minOverlap, MAX_OVERLAP_CORRECTION);
+    const sign = (dx * minAx + dz * minAz) >= 0 ? 1 : -1;
+    p.x += minAx * correction * sign;
+    p.z += minAz * correction * sign;
+    const v = carBody.velocity;
+    const vDotN = v.x * minAx * sign + v.z * minAz * sign;
+    if (vDotN < 0) {
+      v.x -= vDotN * minAx * sign;
+      v.z -= vDotN * minAz * sign;
+    }
+  }
+}
+
 // Real cars (the local player + every other connected player) for the AI
 // traffic system to brake for, on top of the other traffic cars it already
 // avoids — see traffic.js's update() doc comment for why the tolerances
@@ -995,6 +1178,15 @@ function loop(now) {
   car.setInput(input);
   world.step(FIXED_DT, dt, 5);
   car.update(dt);
+  // Skipped in turbo mode: that's an admin/cheat feature that deliberately
+  // multiplies engine force well past anything a normal drive produces, and
+  // this project's own smoke test caught it fighting this correction into
+  // an unstable state when used to ram a wall on purpose (see
+  // resolveBuildingOverlap's own comment for the two real bugs already
+  // fixed there, and OVERLAP_FIX_MAX_SPEED for the speed half of this same
+  // defensive gating). The anti-tunneling fix this exists for — a normal
+  // drive clipping into a building — doesn't involve turbo mode at all.
+  if (!turboMode) resolveBuildingOverlap(car.chassisBody, car.dims, city.footprints);
 
   // Safety net for the admin panel's turbo mode stacked with the "moon"
   // easter egg's low gravity (or any other combination that pushes the

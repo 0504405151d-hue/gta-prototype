@@ -3,6 +3,7 @@
 // so other modules (destructibles.js) know where to scatter physics props.
 
 import { rand, randInt, choice, resetSeed, buildFacadeTexture, buildRoadTexture, buildSidewalkTexture, buildSoftDotTexture } from './utils.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const GRID_N = 10;           // city is GRID_N x GRID_N blocks (was 7 — bigger city per request)
 export const BLOCK_PITCH = 34;      // distance between block centers
@@ -324,7 +325,9 @@ function addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz) {
 
   const w = 1.9, h = 1.35, l = 4.2;
   const color = choice(PARKED_CAR_COLORS);
-  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.36, metalness: 0.65, clearcoat: 1, clearcoatRoughness: 0.32 });
+  // Round-3 glare pass: same softened clearcoat/roughness/envMapIntensity as
+  // every other car material in the project now (see vehicle.js/traffic.js).
+  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.44, metalness: 0.6, clearcoat: 0.65, clearcoatRoughness: 0.5, envMapIntensity: 0.5 });
   const car = new THREE.Group();
   const base = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.5, l), bodyMat);
   base.position.y = h * 0.32;
@@ -333,18 +336,30 @@ function addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz) {
   car.add(base);
   const cabin = new THREE.Mesh(
     new THREE.BoxGeometry(w * 0.8, h * 0.42, l * 0.48),
-    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.08, metalness: 0.15, clearcoat: 0.5 })
+    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.2, metalness: 0.15, clearcoat: 0.3, clearcoatRoughness: 0.45, envMapIntensity: 0.5 })
   );
   cabin.position.set(0, h * 0.68, -l * 0.05);
   cabin.castShadow = true;
   car.add(cabin);
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
+  // Rim discs merged into one mesh (one draw call for all 4) rather than one
+  // Mesh per wheel — a city can have dozens of parked cars, and traffic.js's
+  // own smoke test caught how fast per-instance draw calls add up under
+  // software rendering (see the comment there); same fix applied here.
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.5 });
+  const rimGeos = [];
   [[-w / 2, l / 2 - 0.7], [w / 2, l / 2 - 0.7], [-w / 2, -l / 2 + 0.6], [w / 2, -l / 2 + 0.6]].forEach(([wx, wz]) => {
     const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.28, 14), wheelMat);
     wheel.rotation.z = Math.PI / 2;
     wheel.position.set(wx, 0.34, wz);
     car.add(wheel);
+    const rGeo = new THREE.CylinderGeometry(0.19, 0.19, 0.3, 12);
+    rGeo.rotateZ(Math.PI / 2);
+    rGeo.translate(wx, 0.34, wz);
+    rimGeos.push(rGeo);
   });
+  car.add(new THREE.Mesh(mergeGeometries(rimGeos), rimMat));
+  rimGeos.forEach((g) => g.dispose());
   car.position.set(x, 0, z);
   car.rotation.y = heading;
   group.add(car);

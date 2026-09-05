@@ -15,13 +15,17 @@
 // anything.
 
 import { rand, randInt, choice } from './utils.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const CAR_W = 1.9, CAR_H = 1.3, CAR_L = 4.2;
 const TRAFFIC_COLORS = [0x2b6fd8, 0xd0d0d6, 0x1a1c22, 0xb32020, 0xd7a52c, 0x2f7d4a, 0x6b6f76];
 
 function buildTrafficCarMesh(THREE, color) {
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.4, metalness: 0.6, clearcoat: 1, clearcoatRoughness: 0.35 });
+  // Round-3 glare pass: same clearcoat/roughness/envMapIntensity softening
+  // applied to the player's own paint (see vehicle.js) — traffic paint was
+  // just as mirror-hot in direct sun as the player car used to be.
+  const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.46, metalness: 0.55, clearcoat: 0.65, clearcoatRoughness: 0.55, envMapIntensity: 0.5 });
   const base = new THREE.Mesh(new THREE.BoxGeometry(CAR_W, CAR_H * 0.5, CAR_L), bodyMat);
   base.position.y = CAR_H * 0.32;
   base.castShadow = true;
@@ -29,18 +33,56 @@ function buildTrafficCarMesh(THREE, color) {
   group.add(base);
   const cabin = new THREE.Mesh(
     new THREE.BoxGeometry(CAR_W * 0.8, CAR_H * 0.42, CAR_L * 0.48),
-    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.1, metalness: 0.15, clearcoat: 0.5 })
+    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.2, metalness: 0.15, clearcoat: 0.3, clearcoatRoughness: 0.45, envMapIntensity: 0.5 })
   );
   cabin.position.set(0, CAR_H * 0.68, -CAR_L * 0.05);
   cabin.castShadow = true;
   group.add(cabin);
+
+  // Trim: bumper strips + wing mirrors + two-tone wheels — the same cheap
+  // panel-breaking detail the player's own car got (round-3: "improve the
+  // NPC car models too"). A city street can have a dozen-plus of these cars
+  // on screen at once, and this project's own smoke test caught a real
+  // performance cliff from adding these as one THREE.Mesh (= one draw call)
+  // each: 8 extra draw calls × ~16-20 traffic cars was enough to make the
+  // (software-rendered, worst-case) test browser become fully unresponsive
+  // a couple of scripted actions later. Baking the bumpers+mirrors into one
+  // merged geometry/mesh, and the 4 rim discs into another, keeps the exact
+  // same visual detail at 2 extra draw calls per car instead of 8.
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x121317, roughness: 0.55, metalness: 0.7 });
+  const trimGeos = [];
+  const fbGeo = new THREE.BoxGeometry(CAR_W * 0.98, CAR_H * 0.2, 0.22);
+  fbGeo.translate(0, CAR_H * 0.22, CAR_L / 2 - 0.13);
+  trimGeos.push(fbGeo);
+  const rbGeo = new THREE.BoxGeometry(CAR_W * 0.98, CAR_H * 0.2, 0.22);
+  rbGeo.translate(0, CAR_H * 0.22, -CAR_L / 2 + 0.13);
+  trimGeos.push(rbGeo);
+  [-1, 1].forEach((side) => {
+    const mGeo = new THREE.BoxGeometry(0.14, 0.1, 0.22);
+    mGeo.translate(side * (CAR_W / 2 + 0.05), CAR_H * 0.58, CAR_L * 0.14);
+    trimGeos.push(mGeo);
+  });
+  const trimMesh = new THREE.Mesh(mergeGeometries(trimGeos), trimMat);
+  group.add(trimMesh);
+  trimGeos.forEach((g) => g.dispose());
+
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
-  [[-CAR_W / 2, CAR_L / 2 - 0.7], [CAR_W / 2, CAR_L / 2 - 0.7], [-CAR_W / 2, -CAR_L / 2 + 0.6], [CAR_W / 2, -CAR_L / 2 + 0.6]].forEach(([wx, wz]) => {
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
+  const wheelSpots = [[-CAR_W / 2, CAR_L / 2 - 0.7], [CAR_W / 2, CAR_L / 2 - 0.7], [-CAR_W / 2, -CAR_L / 2 + 0.6], [CAR_W / 2, -CAR_L / 2 + 0.6]];
+  const rimGeos = [];
+  wheelSpots.forEach(([wx, wz]) => {
     const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.28, 14), wheelMat);
     wheel.rotation.z = Math.PI / 2;
     wheel.position.set(wx, 0.34, wz);
     group.add(wheel);
+    const rGeo = new THREE.CylinderGeometry(0.19, 0.19, 0.3, 12);
+    rGeo.rotateZ(Math.PI / 2);
+    rGeo.translate(wx, 0.34, wz);
+    rimGeos.push(rGeo);
   });
+  const rimMesh = new THREE.Mesh(mergeGeometries(rimGeos), rimMat);
+  group.add(rimMesh);
+  rimGeos.forEach((g) => g.dispose());
   // Fake (non-lit) head/tail lamps — an actual light source per traffic car
   // would tank performance with a dozen+ of them on screen, so these are
   // emissive-only, just like the parked cars.
@@ -54,7 +96,7 @@ function buildTrafficCarMesh(THREE, color) {
     tl.position.set(x, 0.42, -CAR_L / 2 + 0.05);
     group.add(tl);
   });
-  return group;
+  return { group, bodyMat };
 }
 
 // Four axis-aligned directions in street-grid INDEX space (exactly one of
@@ -104,16 +146,15 @@ export class TrafficSystem {
     const dir = choice(dirs);
     const color = choice(TRAFFIC_COLORS);
 
-    const mesh = buildTrafficCarMesh(this.THREE, color);
+    const { group: mesh, bodyMat } = buildTrafficCarMesh(this.THREE, color);
     this.scene.add(mesh);
 
     const shape = new this.CANNON.Box(new this.CANNON.Vec3(CAR_W / 2, CAR_H / 2, CAR_L / 2));
     const body = new this.CANNON.Body({ mass: 0, type: this.CANNON.Body.KINEMATIC, shape });
-    body.userData = { isTraffic: true };
     this.world.addBody(body);
 
     const car = {
-      mesh, body,
+      mesh, body, bodyMat, baseColor: color,
       ix, iz, dx: dir.dx, dz: dir.dz,
       t: rand(0, 1),
       speed: rand(4.5, 8),
@@ -121,6 +162,19 @@ export class TrafficSystem {
       turnSpeed: 5,
       turn: null, // set while rounding a corner — see _beginTurn()/_placeCarOnArc()
       lastPos: new this.THREE.Vector3(),
+      // Damage reaction state — see registerHit() and its use in update()
+      // below. hitFlash drives a brief blinking dark-damage tint on the
+      // body paint; stunTime forces the car to brake to a stop for a beat,
+      // the way a real driver would after getting rammed, instead of a
+      // traffic car sailing through a hard hit with zero reaction.
+      hitFlash: 0,
+      stunTime: 0,
+    };
+    body.userData = { isTraffic: true, trafficRef: car };
+    car.registerHit = (impactSpeed) => {
+      const severity = Math.min(1, impactSpeed / 14);
+      car.hitFlash = Math.max(car.hitFlash, 0.5 + severity * 0.7);
+      car.stunTime = Math.max(car.stunTime, severity * 1.6);
     };
     this._placeCar(car);
     car.lastPos.copy(car.mesh.position);
@@ -222,14 +276,29 @@ export class TrafficSystem {
     const segLen = this.streetCoords[1] !== undefined ? Math.abs(this.streetCoords[1] - this.streetCoords[0]) : 34;
 
     for (const car of this.cars) {
+      // Damage reaction: a blinking dark tint while hitFlash counts down,
+      // and a forced stop while stunTime counts down — see registerHit(),
+      // called from vehicle.js's _onChassisCollide() when the player rams
+      // this car hard enough. Restores the car's real paint color the
+      // instant the flash ends rather than leaving it stuck mid-blink.
+      if (car.hitFlash > 0) {
+        car.hitFlash = Math.max(0, car.hitFlash - dt);
+        const blink = Math.floor(car.hitFlash * 12) % 2 === 0;
+        car.bodyMat.color.setHex(blink ? 0x2a0a0a : car.baseColor);
+        if (car.hitFlash === 0) car.bodyMat.color.setHex(car.baseColor);
+      }
+      if (car.stunTime > 0) car.stunTime = Math.max(0, car.stunTime - dt);
+
       // Brake for the nearest car ahead of us in roughly the same lane —
       // a lightweight stand-in for real lane reservation/intersection
       // priority, just enough that traffic doesn't visibly drive through
       // itself (or the player) in a straight line.
-      let blocked = false;
-      for (const other of this.cars) {
-        if (other === car) continue;
-        if (this._isAheadAndClose(car, other.mesh.position, 2.2, 7)) { blocked = true; break; }
+      let blocked = car.stunTime > 0;
+      if (!blocked) {
+        for (const other of this.cars) {
+          if (other === car) continue;
+          if (this._isAheadAndClose(car, other.mesh.position, 2.2, 7)) { blocked = true; break; }
+        }
       }
       if (!blocked) {
         for (const obs of obstacles) {
