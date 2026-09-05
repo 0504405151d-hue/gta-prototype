@@ -8,7 +8,7 @@ const RECONNECT_MAX_MS = 6000;
 const PING_INTERVAL_MS = 3000;
 
 export class Network {
-  constructor({ onWelcome, onJoin, onLeave, onState, onHit, onRest, onName, onConnectionChange, onPing }) {
+  constructor({ onWelcome, onJoin, onLeave, onState, onHit, onRest, onName, onConnectionChange, onPing, onChat }) {
     this.onWelcome = onWelcome;
     this.onJoin = onJoin;
     this.onLeave = onLeave;
@@ -18,6 +18,7 @@ export class Network {
     this.onName = onName;
     this.onConnectionChange = onConnectionChange;
     this.onPing = onPing;
+    this.onChat = onChat;
 
     this.ws = null;
     this.id = null;
@@ -107,6 +108,9 @@ export class Network {
             this.onPing && this.onPing(this.rttMs);
           }
           break;
+        case 'chat':
+          this.onChat && this.onChat(msg);
+          break;
       }
     });
   }
@@ -132,5 +136,9 @@ export class Network {
 
   sendRest(payload) {
     this._send({ type: 'rest', payload });
+  }
+
+  sendChat(text) {
+    this._send({ type: 'chat', text });
   }
 }

@@ -42,17 +42,24 @@ function applyChassisInertiaFix(chassisBody, offsetY) {
 }
 
 export class Vehicle {
-  constructor(THREE, CANNON, world, scene, { color = 0xff3b30, position = { x: 0, y: 1.2, z: 0 }, heading = 0, onEffect } = {}) {
+  constructor(THREE, CANNON, world, scene, {
+    color = 0xff3b30, position = { x: 0, y: 1.2, z: 0 }, heading = 0, onEffect,
+    // Per-model overrides (see carPresets.js) — defaults below match the
+    // original single "sedan" body this project shipped with, so passing
+    // nothing keeps the exact same car as before presets existed.
+    dims = { chassisW: 1.9, chassisH: 0.65, chassisL: 4.2 },
+    mass = 165, maxForce = 1000, maxSteer = 0.32, maxBrakeForce = 55,
+  } = {}) {
     this.THREE = THREE;
     this.CANNON = CANNON;
     this.world = world;
     this.onEffect = onEffect || (() => {});
 
     // ---------- Chassis ----------
-    const chassisW = 1.9, chassisH = 0.65, chassisL = 4.2;
+    const { chassisW, chassisH, chassisL } = dims;
     this.dims = { chassisW, chassisH, chassisL };
     const chassisShape = new CANNON.Box(new CANNON.Vec3(chassisW / 2, chassisH / 2, chassisL / 2));
-    const chassisBody = new CANNON.Body({ mass: 165, material: new CANNON.Material('chassis') });
+    const chassisBody = new CANNON.Body({ mass, material: new CANNON.Material('chassis') });
     chassisBody.addShape(chassisShape, new CANNON.Vec3(0, CHASSIS_Y_OFFSET, 0));
     chassisBody.position.set(position.x, position.y, position.z);
     chassisBody.quaternion.setFromEuler(0, heading, 0);
@@ -246,6 +253,7 @@ export class Vehicle {
     group.add(headBeam, headBeam.target);
 
     const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.4 });
+    this.tailMat = tailMat;
     [-0.6, 0.6].forEach((x) => {
       const tl = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), tailMat);
       tl.position.set(x, 0.45, -chassisL / 2 + 0.05);
@@ -270,6 +278,24 @@ export class Vehicle {
       const hub = new THREE.Mesh(new THREE.CylinderGeometry(WHEEL_RADIUS * 0.14, WHEEL_RADIUS * 0.14, 0.36, 10), rimMat);
       hub.rotation.z = Math.PI / 2;
       wheelGroup.add(hub);
+      // A perfectly round rim is rotationally symmetric, so even with
+      // correct spin math the wheel would look completely static — nothing
+      // on it moves as it "rotates". Five spokes radiating from the hub
+      // give the eye something asymmetric to actually see turning.
+      const spokeLen = WHEEL_RADIUS * 0.5;
+      const radialDist = WHEEL_RADIUS * 0.14 + spokeLen / 2;
+      const spokeGeo = new THREE.BoxGeometry(0.05, spokeLen, 0.05); // long axis along Y before rotation
+      for (let s = 0; s < 5; s++) {
+        const angle = (s / 5) * Math.PI * 2;
+        const spoke = new THREE.Mesh(spokeGeo, rimMat);
+        // rotation.x spins the box's long axis into the Y-Z plane (the
+        // wheel's face, perpendicular to the X axle) at this angle; the
+        // position must follow that SAME rotated direction, not the
+        // parent's plain Y axis, or all five would overlap in one spot.
+        spoke.rotation.x = angle;
+        spoke.position.set(0, Math.cos(angle) * radialDist, Math.sin(angle) * radialDist);
+        wheelGroup.add(spoke);
+      }
       // IMPORTANT: added to the SCENE, not to `group`. cannon-es's
       // wheelInfo.worldTransform is already a WORLD-space transform; `group`
       // is itself moved/rotated to the chassis's world transform every
@@ -284,9 +310,9 @@ export class Vehicle {
 
     // control state
     this.input = { throttle: 0, steer: 0, brake: 0, handbrake: false };
-    this.maxSteer = 0.32;
-    this.maxForce = 1000;
-    this.maxBrakeForce = 55;
+    this.maxSteer = maxSteer;
+    this.maxForce = maxForce;
+    this.maxBrakeForce = maxBrakeForce;
   }
 
   setInput(input) {
@@ -313,6 +339,12 @@ export class Vehicle {
 
     this._applyAntiRoll();
 
+    // Brake lights actually light up under braking instead of sitting at a
+    // fixed glow all the time — a small thing, but it's the difference
+    // between "a car with red spheres on the back" and a car that reads as
+    // driven.
+    this.tailMat.emissiveIntensity = handbrake ? 3.4 : 1.4;
+
     // sync visuals
     const chassis = this.chassisBody;
     this.group.position.copy(chassis.position);
@@ -323,8 +355,16 @@ export class Vehicle {
       const t = v.wheelInfos[i].worldTransform;
       const mesh = this.wheelMeshes[i];
       mesh.position.copy(t.position);
+      // t.quaternion already IS the correct wheel orientation — cannon-es
+      // composes it as chassis * steering * rolling-spin-around-the-axle,
+      // and the tire/rim/hub children below carry their own single
+      // rotation.z=90° to align the cylinder's axis with that axle. An
+      // extra rotateZ(90°) used to be applied here too; stacked with the
+      // children's own 90°, that's a 180° twist that points the tire's
+      // rolling axis off the true axle — instead of spinning cleanly, the
+      // wheel tumbled end-over-end as it rolled (and looked like it was
+      // being dragged rather than driven). Just copy the transform as-is.
       mesh.quaternion.copy(t.quaternion);
-      mesh.rotateZ(Math.PI / 2);
     }
   }
 
@@ -395,7 +435,9 @@ export class Vehicle {
   // -------------------------------------------------------------------
   _onChassisCollide(e) {
     const other = e.body;
-    if (!other.userData || !other.userData.isBuilding) return; // only solid structures dent the car
+    // Solid structures AND AI traffic dent the car — a moving car should
+    // feel just as real a thing to hit as a wall does.
+    if (!other.userData || !(other.userData.isBuilding || other.userData.isTraffic)) return;
     const contact = e.contact;
     const impactSpeed = contact.getImpactVelocityAlongNormal ? Math.abs(contact.getImpactVelocityAlongNormal()) : 0;
     if (impactSpeed < DENT_SPEED_THRESHOLD) return;
@@ -458,6 +500,15 @@ export class Vehicle {
     pos.needsUpdate = true;
     this._dentAccum.fill(0);
     this.baseGeo.computeVertexNormals();
+  }
+
+  /** Tears this car back down — used when switching car models mid-session
+   * (the RaycastVehicle's wheels are pure raycasts against the chassis body,
+   * not separate bodies, so only the chassis itself needs removing). */
+  dispose(scene) {
+    this.vehicle.removeFromWorld(this.world); // this also removes chassisBody itself, per cannon-es's own addToWorld/removeFromWorld pairing
+    scene.remove(this.group);
+    for (const w of this.wheelMeshes) scene.remove(w);
   }
 }
 

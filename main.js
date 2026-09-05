@@ -6,22 +6,26 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-import { buildCity } from './city.js';
+import { buildCity, ROAD_HALF_WIDTH } from './city.js';
 import { Vehicle, RemoteCar } from './vehicle.js';
 import { DestructibleField } from './destructibles.js';
 import { EffectsSystem } from './effects.js';
 import { AudioSystem } from './audio.js';
 import { Network } from './network.js';
+import { TrafficSystem } from './traffic.js';
 import { choice } from './utils.js';
+import { loadSettings, saveSettings, TRAFFIC_COUNTS } from './settings.js';
+import { WeatherSystem } from './weather.js';
+import { CAR_PRESETS, CAR_COLORS } from './carPresets.js';
+
+const settings = loadSettings();
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: settings.graphics !== 'low', powerPreference: 'high-performance' });
+applyGraphicsSettings(settings.graphics);
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -57,6 +61,18 @@ addEventListener('resize', () => {
   composer.setSize(innerWidth, innerHeight);
 });
 
+// Graphics quality setting: pixel ratio cap + shadow map on/off/quality.
+// Antialiasing can only be picked at renderer creation (see above), so a
+// change to "low" mid-session won't retroactively turn it off — everything
+// else here does apply immediately.
+function applyGraphicsSettings(level) {
+  const pr = level === 'low' ? 1 : level === 'medium' ? Math.min(devicePixelRatio, 1.5) : Math.min(devicePixelRatio, 2);
+  renderer.setPixelRatio(pr);
+  renderer.shadowMap.enabled = level !== 'low';
+  renderer.shadowMap.type = level === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  renderer.shadowMap.needsUpdate = true;
+}
+
 // ---------------------------------------------------------------------------
 // Physics world
 // ---------------------------------------------------------------------------
@@ -73,6 +89,7 @@ world.allowSleep = true;
 // ---------------------------------------------------------------------------
 const effects = new EffectsSystem(THREE, scene);
 const audio = new AudioSystem();
+audio.setVolume(settings.volume);
 
 function handleEffect(kind, pos, strength) {
   const p = new THREE.Vector3(pos.x, pos.y, pos.z);
@@ -93,23 +110,42 @@ function handleEffect(kind, pos, strength) {
 setBootProgress(12, 'Строим город…');
 const city = buildCity(THREE, CANNON, world, scene);
 
-setBootProgress(45, 'Расставляем разрушаемые объекты…');
+setBootProgress(40, 'Расставляем разрушаемые объекты…');
 const destructibles = new DestructibleField(THREE, CANNON, world, scene, {
   onEffect: handleEffect,
   onRest: (id, pose) => net.sendRest({ id, p: pose.p, q: pose.q }),
 });
 destructibles.spawnField(city.propSpots);
 
-setBootProgress(75, 'Готовим машину…');
-const CAR_COLORS = [0xff3b30, 0x34c759, 0x0a84ff, 0xffcc00, 0xaf52de, 0xff9500, 0x5ac8fa, 0xff2d55];
-let myColor = choice(CAR_COLORS);
-const spawn = choice(city.spawnPoints);
-let car = new Vehicle(THREE, CANNON, world, scene, {
-  color: myColor,
-  position: { x: spawn.x, y: 1.4, z: spawn.z },
-  heading: spawn.heading,
-  onEffect: handleEffect,
+setBootProgress(58, 'Выпускаем трафик…');
+const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords, {
+  laneOffset: ROAD_HALF_WIDTH / 2,
+  count: TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium,
 });
+
+setBootProgress(70, 'Настраиваем погоду…');
+const weather = new WeatherSystem(THREE, scene, city, city.groundMat);
+weather.set(settings.weather);
+
+setBootProgress(80, 'Готовим машину…');
+let myColor = choice(CAR_COLORS);
+let selectedCarId = CAR_PRESETS[settings.carModel] ? settings.carModel : 'sedan';
+function buildVehicleAt(spawnPoint, carId) {
+  const preset = CAR_PRESETS[carId] || CAR_PRESETS.sedan;
+  return new Vehicle(THREE, CANNON, world, scene, {
+    color: myColor,
+    position: { x: spawnPoint.x, y: 1.4, z: spawnPoint.z },
+    heading: spawnPoint.heading,
+    onEffect: handleEffect,
+    dims: preset.dims,
+    mass: preset.mass,
+    maxForce: preset.maxForce,
+    maxSteer: preset.maxSteer,
+    maxBrakeForce: preset.maxBrakeForce,
+  });
+}
+const spawn = choice(city.spawnPoints);
+let car = buildVehicleAt(spawn, selectedCarId);
 
 setBootProgress(100, 'Готово');
 
@@ -118,6 +154,12 @@ setBootProgress(100, 'Готово');
 // ---------------------------------------------------------------------------
 const keys = new Set();
 addEventListener('keydown', (e) => {
+  // Chat/phone/name-field inputs get their own dedicated key handling
+  // (Enter to send, Escape to cancel) — while one is focused, every other
+  // shortcut below (including WASD reaching the driving key state at all)
+  // is switched off so typing "car" doesn't cycle the camera and respawn.
+  const typing = document.activeElement && document.activeElement.tagName === 'INPUT';
+  if (typing) return;
   keys.add(e.code);
   if (e.code === 'KeyC') {
     cameraMode = (cameraMode + 1) % 3;
@@ -126,6 +168,8 @@ addEventListener('keydown', (e) => {
   }
   if (e.code === 'KeyR') respawnCar();
   if (e.code === 'KeyP') setPaused(!paused);
+  if (e.code === 'KeyM') setPhone(!phoneOpen);
+  if (e.code === 'Enter' && !paused && !phoneOpen) openChat();
   // Esc closes the menu too, but only when it isn't already busy exiting
   // free-fly's pointer lock (that has its own handler right below) — firing
   // both at once would just reopen the menu the instant free-cam drops out.
@@ -161,6 +205,195 @@ muteBtnEl.addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Chat — a lightweight HUD log (Enter to open/send, Esc to cancel) that
+// shares the same message list with the phone's Messages tab below. Not
+// echoed back by the server (see server.js) — sending renders locally right
+// away instead of waiting on a round trip.
+// ---------------------------------------------------------------------------
+let chatOpen = false;
+const chatMessages = []; // { id, name, color, text }
+const chatLogEl = document.getElementById('chatLog');
+const chatInputWrapEl = document.getElementById('chatInputWrap');
+const chatInputEl = document.getElementById('chatInput');
+const phoneChatLogEl = document.getElementById('phoneChatLog');
+const phoneChatInputEl = document.getElementById('phoneChatInput');
+
+function openChat() {
+  chatOpen = true;
+  chatInputWrapEl.style.display = 'block';
+  chatInputEl.value = '';
+  chatInputEl.focus();
+}
+function closeChat() {
+  chatOpen = false;
+  chatInputWrapEl.style.display = 'none';
+  chatInputEl.blur();
+}
+function renderChatInto(container, msgs) {
+  container.innerHTML = '';
+  for (const m of msgs) {
+    const row = document.createElement('div');
+    row.className = 'msg';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = (m.name || `Игрок ${m.id}`) + ':';
+    who.style.color = `#${(m.color ?? 0x8fa8ff).toString(16).padStart(6, '0')}`;
+    row.appendChild(who);
+    row.appendChild(document.createTextNode(m.text)); // textContent-safe — never innerHTML with player-typed text
+    container.appendChild(row);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+function renderChat() {
+  renderChatInto(chatLogEl, chatMessages.slice(-6));
+  renderChatInto(phoneChatLogEl, chatMessages);
+}
+function addChatMessage(msg) {
+  chatMessages.push(msg);
+  if (chatMessages.length > 50) chatMessages.shift();
+  renderChat();
+}
+function sendChatText(text) {
+  const trimmed = text.trim().slice(0, 140);
+  if (!trimmed) return;
+  net.sendChat(trimmed);
+  addChatMessage({ id: net.id, name: myName, color: myColor, text: trimmed });
+}
+chatInputEl.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.code === 'Enter') {
+    sendChatText(chatInputEl.value);
+    closeChat();
+  } else if (e.code === 'Escape') {
+    closeChat();
+  }
+});
+phoneChatInputEl.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.code === 'Enter') {
+    sendChatText(phoneChatInputEl.value);
+    phoneChatInputEl.value = '';
+  }
+});
+document.getElementById('phoneChatSend').addEventListener('click', () => {
+  sendChatText(phoneChatInputEl.value);
+  phoneChatInputEl.value = '';
+});
+
+// ---------------------------------------------------------------------------
+// Phone — a small in-fiction shell around chat/settings/map, toggled with M
+// (or the HUD/pause-menu buttons). Opening it locks driving input, same as
+// the pause menu, but leaves physics/networking running.
+// ---------------------------------------------------------------------------
+let phoneOpen = false;
+let phoneTab = 'messages';
+const phoneOverlayEl = document.getElementById('phoneOverlay');
+const phonePages = {
+  messages: document.getElementById('phonePageMessages'),
+  settings: document.getElementById('phonePageSettings'),
+  map: document.getElementById('phonePageMap'),
+};
+
+function setPhone(v) {
+  phoneOpen = v;
+  phoneOverlayEl.style.display = v ? 'flex' : 'none';
+  if (v) {
+    renderChat();
+    refreshSettingsUI();
+    if (phoneTab === 'map') drawPhoneMap();
+  }
+}
+
+document.querySelectorAll('.phoneTab').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    phoneTab = btn.dataset.tab;
+    document.querySelectorAll('.phoneTab').forEach((b) => b.classList.toggle('active', b === btn));
+    for (const [name, el] of Object.entries(phonePages)) el.style.display = name === phoneTab ? 'flex' : 'none';
+    if (phoneTab === 'map') drawPhoneMap();
+  });
+});
+document.getElementById('phoneCloseBtn').addEventListener('click', () => setPhone(false));
+document.getElementById('phoneHintBtn').addEventListener('click', () => setPhone(!phoneOpen));
+document.getElementById('menuPhoneBtn').addEventListener('click', () => {
+  setPaused(false);
+  setPhone(true);
+});
+
+function drawPhoneMap() {
+  const canvas = document.getElementById('phoneMapCanvas');
+  if (!canvas) return;
+  drawMinimapInto(canvas, city.cityHalf * 1.15);
+}
+
+// ---------------------------------------------------------------------------
+// Settings (phone → Настройки) — persisted to localStorage via settings.js.
+// ---------------------------------------------------------------------------
+const volumeRangeEl = document.getElementById('volumeRange');
+const volumeValEl = document.getElementById('volumeVal');
+const graphicsSelectEl = document.getElementById('graphicsSelect');
+const trafficSelectEl = document.getElementById('trafficSelect');
+const weatherSelectEl = document.getElementById('weatherSelect');
+const sensRangeEl = document.getElementById('sensRange');
+const sensValEl = document.getElementById('sensVal');
+const minimapToggleEl = document.getElementById('minimapToggle');
+const carSelectEl = document.getElementById('carSelect');
+const minimapWrapEl = document.getElementById('minimapWrap');
+
+function refreshSettingsUI() {
+  volumeRangeEl.value = Math.round(settings.volume * 100);
+  volumeValEl.textContent = Math.round(settings.volume * 100);
+  graphicsSelectEl.value = settings.graphics;
+  trafficSelectEl.value = settings.traffic;
+  weatherSelectEl.value = settings.weather;
+  sensRangeEl.value = Math.round(settings.sensitivity * 100);
+  sensValEl.textContent = settings.sensitivity.toFixed(1);
+  minimapToggleEl.checked = settings.minimap;
+  carSelectEl.value = selectedCarId;
+}
+
+volumeRangeEl.addEventListener('input', () => {
+  settings.volume = Number(volumeRangeEl.value) / 100;
+  volumeValEl.textContent = volumeRangeEl.value;
+  audio.setVolume(settings.volume);
+  saveSettings(settings);
+});
+graphicsSelectEl.addEventListener('change', () => {
+  settings.graphics = graphicsSelectEl.value;
+  applyGraphicsSettings(settings.graphics);
+  saveSettings(settings);
+});
+trafficSelectEl.addEventListener('change', () => {
+  settings.traffic = trafficSelectEl.value;
+  traffic.setCount(TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium);
+  saveSettings(settings);
+});
+weatherSelectEl.addEventListener('change', () => {
+  settings.weather = weatherSelectEl.value;
+  weather.set(settings.weather);
+  saveSettings(settings);
+});
+sensRangeEl.addEventListener('input', () => {
+  settings.sensitivity = Number(sensRangeEl.value) / 100;
+  sensValEl.textContent = settings.sensitivity.toFixed(1);
+  saveSettings(settings);
+});
+minimapToggleEl.addEventListener('change', () => {
+  settings.minimap = minimapToggleEl.checked;
+  minimapWrapEl.style.display = settings.minimap ? 'block' : 'none';
+  saveSettings(settings);
+});
+document.getElementById('applyCarBtn').addEventListener('click', () => {
+  const newId = carSelectEl.value;
+  selectedCarId = newId;
+  settings.carModel = newId;
+  saveSettings(settings);
+  const s = choice(city.spawnPoints);
+  car.dispose(scene);
+  car = buildVehicleAt(s, newId);
+  setPhone(false);
+});
+
+// ---------------------------------------------------------------------------
 // Free-fly camera: mouse-look (pointer lock) + WASD/QE flight, independent of
 // the car. While active, WASD drives the camera instead of the car — the car
 // stays drivable via the arrow keys so you can still watch it move around.
@@ -184,7 +417,7 @@ function exitFreeCam() {
 
 addEventListener('mousemove', (e) => {
   if (!freeCam.active || document.pointerLockElement !== renderer.domElement) return;
-  const sens = 0.0025;
+  const sens = 0.0025 * settings.sensitivity;
   freeCam.yaw -= e.movementX * sens;
   freeCam.pitch -= e.movementY * sens;
   const limit = Math.PI / 2 - 0.01;
@@ -216,7 +449,7 @@ function updateFreeCam(dt) {
 }
 
 function readInput() {
-  if (paused) return { throttle: 0, steer: 0, brake: 0, handbrake: false };
+  if (paused || chatOpen || phoneOpen) return { throttle: 0, steer: 0, brake: 0, handbrake: false };
 
   // While free-flying, WASD steers the camera instead — the car is still
   // drivable through the arrow keys so it doesn't just sit there.
@@ -368,6 +601,21 @@ function setBootProgress(pct, label) {
   }
 }
 
+// Car picker on the start screen — just updates `selectedCarId`; the actual
+// car gets (re)built for that choice once "Сесть за руль" is clicked below.
+document.querySelectorAll('.carOption').forEach((el) => {
+  el.classList.toggle('selected', el.dataset.car === selectedCarId);
+  el.addEventListener('click', () => {
+    selectedCarId = el.dataset.car;
+    document.querySelectorAll('.carOption').forEach((o) => o.classList.toggle('selected', o === el));
+  });
+});
+
+// Settings persisted from a previous session (a different minimap/car choice
+// than the hardcoded defaults) need applying once, here, before the HUD
+// becomes visible.
+minimapWrapEl.style.display = settings.minimap ? 'block' : 'none';
+
 document.getElementById('startBtn').addEventListener('click', () => {
   myName = document.getElementById('nameHint').value.trim().slice(0, 16);
   document.getElementById('startOverlay').style.display = 'none';
@@ -376,6 +624,12 @@ document.getElementById('startBtn').addEventListener('click', () => {
   audio.resume(); // user gesture — required before Web Audio can produce sound
   net.setName(myName);
   net.connect();
+  // The car built during boot used whatever model was saved from last time;
+  // rebuild it now against whatever the player actually picked just above.
+  settings.carModel = selectedCarId;
+  saveSettings(settings);
+  car.dispose(scene);
+  car = buildVehicleAt(spawn, selectedCarId);
   lastTime = performance.now();
   requestAnimationFrame(loop);
 });
@@ -389,10 +643,15 @@ function updateCamera(dt) {
   const back = cameraMode === 0 ? 8.5 : 4.5;
   const up = cameraMode === 0 ? 3.6 : 2.0;
   const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(car.group.quaternion);
-  camOffset.copy(car.group.position).addScaledVector(forward, back);
+  // Camera sits BEHIND the car (opposite the forward/headlight direction) and
+  // looks at a point AHEAD of it. This was inverted before — the camera sat
+  // in front of the car looking at a point behind it, so driving forward
+  // moved the car toward the camera tail-first, reading as "driving in
+  // reverse" even though the physics/input direction was always correct.
+  camOffset.copy(car.group.position).addScaledVector(forward, -back);
   camOffset.y += up;
   camera.position.lerp(camOffset, 1 - Math.pow(0.001, dt));
-  camTarget.copy(car.group.position).addScaledVector(forward, -6);
+  camTarget.copy(car.group.position).addScaledVector(forward, 6);
   camTarget.y += 1.2;
   camera.lookAt(camTarget);
 }
@@ -487,51 +746,66 @@ function drawCompass() {
 // straight from the same building footprints the physics world uses.
 // ---------------------------------------------------------------------------
 const minimapCanvas = document.getElementById('minimap');
-const mmCtx = minimapCanvas ? minimapCanvas.getContext('2d') : null;
-const MM_SIZE = minimapCanvas ? minimapCanvas.width : 0;
-const MM_RANGE = 90; // world units visible across the minimap
-function drawMinimap() {
-  if (!mmCtx) return;
-  const scale = MM_SIZE / (MM_RANGE * 2);
+const MM_RANGE = 90; // world units visible across the small HUD minimap
+
+// Shared drawing code for both the small HUD minimap and the phone's bigger
+// map view — same logic, different canvas/range.
+function drawMinimapInto(canvas, range) {
+  const ctx = canvas ? canvas.getContext('2d') : null;
+  if (!ctx) return;
+  const size = canvas.width;
+  const scale = size / (range * 2);
   const px = car.group.position.x;
   const pz = car.group.position.z;
 
-  mmCtx.clearRect(0, 0, MM_SIZE, MM_SIZE);
-  mmCtx.fillStyle = 'rgba(8,10,18,0.55)';
-  mmCtx.fillRect(0, 0, MM_SIZE, MM_SIZE);
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(8,10,18,0.55)';
+  ctx.fillRect(0, 0, size, size);
 
-  const toMM = (wx, wz) => [MM_SIZE / 2 + (wx - px) * scale, MM_SIZE / 2 + (wz - pz) * scale];
+  const toMM = (wx, wz) => [size / 2 + (wx - px) * scale, size / 2 + (wz - pz) * scale];
 
-  mmCtx.fillStyle = 'rgba(120,130,160,0.55)';
+  ctx.fillStyle = 'rgba(120,130,160,0.55)';
   for (const f of city.footprints) {
-    if (Math.abs(f.x - px) > MM_RANGE + 20 || Math.abs(f.z - pz) > MM_RANGE + 20) continue;
+    if (Math.abs(f.x - px) > range + 20 || Math.abs(f.z - pz) > range + 20) continue;
     const [x, z] = toMM(f.x - f.w / 2, f.z - f.d / 2);
-    mmCtx.fillRect(x, z, f.w * scale, f.d * scale);
+    ctx.fillRect(x, z, f.w * scale, f.d * scale);
+  }
+
+  // AI traffic as small dim dots — helps read the road layout too
+  ctx.fillStyle = 'rgba(230,230,235,0.6)';
+  for (const t of traffic.cars) {
+    const [x, z] = toMM(t.mesh.position.x, t.mesh.position.z);
+    if (x < 0 || x > size || z < 0 || z > size) continue;
+    ctx.fillRect(x - 1.5, z - 1.5, 3, 3);
   }
 
   for (const rc of remoteCars.values()) {
     const [x, z] = toMM(rc.group.position.x, rc.group.position.z);
-    if (x < 0 || x > MM_SIZE || z < 0 || z > MM_SIZE) continue;
-    mmCtx.fillStyle = `#${rc.group.children[0].material.color.getHexString()}`;
-    mmCtx.beginPath();
-    mmCtx.arc(x, z, 3.5, 0, Math.PI * 2);
-    mmCtx.fill();
+    if (x < 0 || x > size || z < 0 || z > size) continue;
+    ctx.fillStyle = `#${rc.group.children[0].material.color.getHexString()}`;
+    ctx.beginPath();
+    ctx.arc(x, z, 3.5, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // local player as a heading-oriented arrow, always centered
   const yaw = getCarYaw();
-  const cx = MM_SIZE / 2, cz = MM_SIZE / 2;
-  mmCtx.save();
-  mmCtx.translate(cx, cz);
-  mmCtx.rotate(yaw);
-  mmCtx.fillStyle = `#${myColor.toString(16).padStart(6, '0')}`;
-  mmCtx.beginPath();
-  mmCtx.moveTo(0, -7);
-  mmCtx.lineTo(5, 6);
-  mmCtx.lineTo(-5, 6);
-  mmCtx.closePath();
-  mmCtx.fill();
-  mmCtx.restore();
+  const cx = size / 2, cz = size / 2;
+  ctx.save();
+  ctx.translate(cx, cz);
+  ctx.rotate(yaw);
+  ctx.fillStyle = `#${myColor.toString(16).padStart(6, '0')}`;
+  ctx.beginPath();
+  ctx.moveTo(0, -7);
+  ctx.lineTo(5, 6);
+  ctx.lineTo(-5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMinimap() {
+  drawMinimapInto(minimapCanvas, MM_RANGE);
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +827,8 @@ function loop(now) {
   car.update(dt);
   destructibles.update(dt);
   effects.update(dt);
+  traffic.update(dt);
+  weather.update(dt, car.group.position);
   for (const rc of remoteCars.values()) rc.update(dt);
   if (cameraMode === 2) updateFreeCam(dt);
   else updateCamera(dt);
@@ -562,6 +838,7 @@ function loop(now) {
   updateSkidFx(dt, speedKmh);
   drawMinimap();
   drawCompass();
+  if (phoneOpen && phoneTab === 'map') drawPhoneMap();
 
   // network: send our transform ~20Hz
   netAccum += dt;

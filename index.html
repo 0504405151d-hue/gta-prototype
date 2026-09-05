@@ -66,6 +66,46 @@
 
   #menuHintBtn { position: absolute; right: 20px; top: 190px; pointer-events: auto; background: rgba(10,14,24,.45); border: 1px solid rgba(255,255,255,.14); color: #eaf0ff; font-size: 12px; padding: 7px 12px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(4px); }
   #menuHintBtn:hover { background: rgba(20,26,42,.6); }
+  #phoneHintBtn { position: absolute; right: 20px; top: 228px; pointer-events: auto; background: rgba(10,14,24,.45); border: 1px solid rgba(255,255,255,.14); color: #eaf0ff; font-size: 12px; padding: 7px 12px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(4px); }
+  #phoneHintBtn:hover { background: rgba(20,26,42,.6); }
+
+  /* Car picker on the start screen */
+  #carPicker { display: flex; gap: 8px; margin-bottom: 14px; }
+  .carOption { flex: 1; background: #0a0f1e; border: 1px solid #2a3352; border-radius: 10px; padding: 10px 6px; cursor: pointer; color: #dfe6ff; text-align: center; }
+  .carOption b { display: block; font-size: 13px; margin-bottom: 3px; }
+  .carOption span { display: block; font-size: 10px; opacity: .7; line-height: 1.4; }
+  .carOption.selected { border-color: #22d3ee; background: #0e1b2e; box-shadow: 0 0 0 1px #22d3ee inset; }
+
+  /* Chat */
+  #chatLog { position: absolute; left: 20px; bottom: 90px; width: 320px; max-height: 140px; overflow: hidden; display: flex; flex-direction: column-reverse; gap: 3px; font-size: 12px; }
+  #chatLog .msg { background: rgba(10,14,24,.55); border-radius: 6px; padding: 4px 8px; backdrop-filter: blur(3px); word-break: break-word; }
+  #chatLog .msg .who { font-weight: 700; margin-right: 5px; }
+  #chatInputWrap { position: absolute; left: 20px; bottom: 90px; width: 320px; pointer-events: auto; }
+  #chatInput { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid #2a3352; background: rgba(10,15,30,.92); color: #eaf0ff; font-size: 13px; }
+
+  /* Phone overlay */
+  #phoneOverlay { position: fixed; inset: 0; z-index: 26; display: none; align-items: center; justify-content: center; background: rgba(3,5,10,.55); }
+  #phoneFrame { position: relative; width: 340px; height: 560px; background: #0b0e18; border: 6px solid #1c2036; border-radius: 34px; box-shadow: 0 20px 60px rgba(0,0,0,.6); display: flex; flex-direction: column; overflow: hidden; color: #dfe6ff; }
+  #phoneCloseBtn { position: absolute; top: 8px; right: 12px; background: none; border: none; color: #9aa4c2; font-size: 16px; cursor: pointer; z-index: 2; }
+  #phoneTabs { display: flex; padding: 14px 10px 6px; gap: 6px; }
+  .phoneTab { flex: 1; background: #141a2c; border: 1px solid #232b45; color: #b7c0e0; font-size: 11px; padding: 8px 4px; border-radius: 8px; cursor: pointer; }
+  .phoneTab.active { background: linear-gradient(135deg,#3b82f6,#22d3ee); color: #04101f; font-weight: 700; border: none; }
+  #phoneBody { flex: 1; overflow: auto; padding: 10px 14px 14px; }
+  .phonePage { height: 100%; display: flex; flex-direction: column; }
+  #phoneChatLog { flex: 1; overflow: auto; font-size: 12px; display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+  #phoneChatLog .msg { background: #141a2c; border-radius: 8px; padding: 6px 9px; word-break: break-word; }
+  #phoneChatLog .msg .who { font-weight: 700; margin-right: 5px; }
+  .phoneChatInputRow { display: flex; gap: 6px; }
+  .phoneChatInputRow input { flex: 1; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid #2a3352; background: #0a0f1e; color: #eaf0ff; font-size: 12px; }
+  .phoneChatInputRow button { background: linear-gradient(135deg,#3b82f6,#22d3ee); border: none; color: #04101f; font-weight: 700; padding: 0 14px; border-radius: 8px; cursor: pointer; }
+
+  .settingRow { margin-bottom: 14px; }
+  .settingRow label { display: block; font-size: 12px; opacity: .8; margin-bottom: 5px; }
+  .settingRow input[type="range"] { width: 100%; }
+  .settingRow select { width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: 8px; border: 1px solid #2a3352; background: #0a0f1e; color: #eaf0ff; font-size: 12px; }
+  .settingRow .checkboxRow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  #phonePageMap { align-items: center; justify-content: center; }
+  #phoneMapCanvas { border-radius: 10px; background: rgba(255,255,255,.03); }
 </style>
 </head>
 <body>
@@ -78,9 +118,14 @@
 <div id="startOverlay" style="display:none">
   <div class="card">
     <h1>City Drive — Multiplayer</h1>
-    <p>Управление: <b>WASD/стрелки</b> — газ/руль, <b>Пробел</b> — ручник, <b>C</b> — смена камеры (3-я — свободная), <b>R</b> — respawn.<br/>
+    <p>Управление: <b>WASD/стрелки</b> — газ/руль, <b>Пробел</b> — ручник, <b>C</b> — смена камеры (3-я — свободная), <b>R</b> — respawn, <b>Enter</b> — чат, <b>M</b> — телефон.<br/>
     В свободной камере: мышь — обзор, <b>WASD</b> — полёт, <b>Q/E</b> — высота, <b>Shift</b> — ускорение, машина едет стрелками.<br/>
-    Врезайся в бочки, конусы и заборы — они разлетаются по физике, а кузов реально мнётся об здания.</p>
+    Врезайся в бочки, конусы и заборы, в другие машины и в трафик — всё физическое.</p>
+    <div id="carPicker">
+      <div class="carOption selected" data-car="sedan"><b>Седан</b><span>Баланс</span></div>
+      <div class="carOption" data-car="sport"><b>Спорткар</b><span>Быстрее, острее руль</span></div>
+      <div class="carOption" data-car="suv"><b>Внедорожник</b><span>Тяжелее, крепче</span></div>
+    </div>
     <input id="nameHint" placeholder="Ник (необязательно)" maxlength="16" />
     <button id="startBtn">Сесть за руль</button>
   </div>
@@ -103,7 +148,12 @@
   <div id="minimapWrap"><canvas id="minimap" width="160" height="160"></canvas></div>
   <div id="compassWrap"><canvas id="compass" width="220" height="30"></canvas></div>
   <button id="menuHintBtn" title="Пауза / меню (P)">☰ Меню (P)</button>
-  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню</div>
+  <button id="phoneHintBtn" title="Телефон (M)">📱 Телефон (M)</button>
+  <div id="chatLog"></div>
+  <div id="chatInputWrap" style="display:none">
+    <input id="chatInput" maxlength="140" placeholder="Сообщение… (Enter — отправить, Esc — отмена)" />
+  </div>
+  <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню &nbsp; <b>Enter</b> чат &nbsp; <b>M</b> телефон</div>
   <div id="netStatus" style="display:none"></div>
 </div>
 
@@ -113,11 +163,84 @@
     <button class="menuBtn primary" id="resumeBtn">Продолжить</button>
     <button class="menuBtn" id="menuRespawnBtn">Respawn</button>
     <button class="menuBtn" id="muteBtn">🔊 Звук: вкл</button>
+    <button class="menuBtn" id="menuPhoneBtn">📱 Телефон</button>
     <div class="controlsList">
       <b>WASD/стрелки</b> — газ/руль &nbsp;·&nbsp; <b>Space</b> — ручник<br/>
       <b>C</b> — камера (погоня → ближняя → свободная)<br/>
       В свободной камере: мышь — обзор, WASD — полёт, Q/E — высота, Shift — ускорение<br/>
-      <b>R</b> — respawn &nbsp;·&nbsp; <b>P</b> / <b>Esc</b> — это меню
+      <b>R</b> — respawn &nbsp;·&nbsp; <b>Enter</b> — чат &nbsp;·&nbsp; <b>M</b> — телефон<br/>
+      <b>P</b> / <b>Esc</b> — это меню
+    </div>
+  </div>
+</div>
+
+<div id="phoneOverlay">
+  <div id="phoneFrame">
+    <button id="phoneCloseBtn">✕</button>
+    <div id="phoneTabs">
+      <button class="phoneTab active" data-tab="messages">Сообщения</button>
+      <button class="phoneTab" data-tab="settings">Настройки</button>
+      <button class="phoneTab" data-tab="map">Карта</button>
+    </div>
+    <div id="phoneBody">
+      <div class="phonePage" id="phonePageMessages">
+        <div id="phoneChatLog"></div>
+        <div class="phoneChatInputRow">
+          <input id="phoneChatInput" maxlength="140" placeholder="Сообщение…" />
+          <button id="phoneChatSend">➤</button>
+        </div>
+      </div>
+      <div class="phonePage" id="phonePageSettings" style="display:none">
+        <div class="settingRow">
+          <label>Громкость: <span id="volumeVal">100</span>%</label>
+          <input type="range" id="volumeRange" min="0" max="100" value="100" />
+        </div>
+        <div class="settingRow">
+          <label>Графика</label>
+          <select id="graphicsSelect">
+            <option value="low">Низкая</option>
+            <option value="medium">Средняя</option>
+            <option value="high" selected>Высокая</option>
+          </select>
+        </div>
+        <div class="settingRow">
+          <label>Трафик</label>
+          <select id="trafficSelect">
+            <option value="off">Выкл</option>
+            <option value="low">Мало</option>
+            <option value="medium" selected>Средне</option>
+            <option value="high">Много</option>
+          </select>
+        </div>
+        <div class="settingRow">
+          <label>Погода</label>
+          <select id="weatherSelect">
+            <option value="clear" selected>Ясно</option>
+            <option value="cloudy">Облачно</option>
+            <option value="rain">Дождь</option>
+            <option value="night">Ночь</option>
+          </select>
+        </div>
+        <div class="settingRow">
+          <label>Чувствительность мыши (своб. камера): <span id="sensVal">1.0</span></label>
+          <input type="range" id="sensRange" min="30" max="250" value="100" />
+        </div>
+        <div class="settingRow">
+          <div class="checkboxRow"><input type="checkbox" id="minimapToggle" checked /> <label style="margin:0">Показывать мини-карту</label></div>
+        </div>
+        <div class="settingRow">
+          <label>Машина</label>
+          <select id="carSelect">
+            <option value="sedan">Седан</option>
+            <option value="sport">Спорткар</option>
+            <option value="suv">Внедорожник</option>
+          </select>
+        </div>
+        <button class="menuBtn primary" id="applyCarBtn">Сменить машину (respawn)</button>
+      </div>
+      <div class="phonePage" id="phonePageMap" style="display:none">
+        <canvas id="phoneMapCanvas" width="280" height="280"></canvas>
+      </div>
     </div>
   </div>
 </div>

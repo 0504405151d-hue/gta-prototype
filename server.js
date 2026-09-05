@@ -26,6 +26,7 @@ const { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 3000;
 const HEARTBEAT_MS = 25000;
 const MAX_NAME_LEN = 16;
+const MAX_CHAT_LEN = 140;
 
 const app = express();
 // Everything (index.html, main.js, city.js, ...) sits right next to this file.
@@ -55,6 +56,18 @@ function sanitizeName(name) {
     if (ch === '<' || ch === '>' || ch === '&' || ch === '"' || ch === "'" || ch === '`') continue;
     out += ch;
     if (out.length >= MAX_NAME_LEN) break;
+  }
+  return out.trim();
+}
+
+function sanitizeChat(text) {
+  if (typeof text !== 'string') return '';
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127) continue; // control chars only — the client renders this as plain text, never HTML
+    out += ch;
+    if (out.length >= MAX_CHAT_LEN) break;
   }
   return out.trim();
 }
@@ -133,6 +146,18 @@ wss.on('connection', (ws) => {
         if (!payload || typeof payload.id !== 'number' || shatteredIds.has(payload.id)) return;
         propRest.set(payload.id, { p: payload.p, q: payload.q });
         broadcast({ type: 'rest', id, payload }, id);
+        break;
+      }
+      case 'chat': {
+        const now = Date.now();
+        if (player.lastChatAt && now - player.lastChatAt < 300) return; // simple flood guard
+        const text = sanitizeChat(msg.text);
+        if (!text) return;
+        player.lastChatAt = now;
+        const payload = { id, name: player.name, color: player.color, text, ts: now };
+        // Not echoed back to the sender — the client renders its own message
+        // immediately on send rather than waiting on a round trip.
+        broadcast({ type: 'chat', ...payload }, id);
         break;
       }
       case 'ping': {

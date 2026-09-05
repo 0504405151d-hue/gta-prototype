@@ -15,6 +15,7 @@ export class AudioSystem {
     this.screechFilter = null;
     this.noiseBuffer = null;
     this.ready = false;
+    this._pendingVolume = 1;
   }
 
   resume() {
@@ -34,6 +35,8 @@ export class AudioSystem {
     masterGain.connect(ctx.destination);
     this.masterGain = masterGain;
     this.muted = false;
+    this.volume = this._pendingVolume != null ? this._pendingVolume : 1;
+    masterGain.gain.value = this.volume;
 
     // --- shared noise buffer used for screech + impact thuds ---
     const bufLen = ctx.sampleRate * 2;
@@ -114,7 +117,17 @@ export class AudioSystem {
   /** Toggles master volume; returns the new muted state. Safe before resume(). */
   toggleMute() {
     this.muted = !this.muted;
-    if (this.masterGain) this.masterGain.gain.setTargetAtTime(this.muted ? 0 : 1, this.ctx.currentTime, 0.05);
+    if (this.masterGain) this.masterGain.gain.setTargetAtTime(this.muted ? 0 : this.volume, this.ctx.currentTime, 0.05);
     return this.muted;
+  }
+
+  /** v: 0..1 master volume slider. Safe to call before resume() — the value
+   * is remembered and applied once the AudioContext actually exists. */
+  setVolume(v) {
+    this._pendingVolume = v;
+    this.volume = v;
+    if (this.ready && !this.muted && this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+    }
   }
 }

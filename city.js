@@ -4,9 +4,9 @@
 
 import { rand, randInt, choice, resetSeed, buildFacadeTexture, buildRoadTexture, buildSidewalkTexture, buildSoftDotTexture } from './utils.js';
 
-const GRID_N = 7;            // city is GRID_N x GRID_N blocks
-const BLOCK_PITCH = 34;      // distance between block centers
-const ROAD_HALF_WIDTH = 5.5; // half width of the road strip between blocks
+const GRID_N = 10;           // city is GRID_N x GRID_N blocks (was 7 — bigger city per request)
+export const BLOCK_PITCH = 34;      // distance between block centers
+export const ROAD_HALF_WIDTH = 5.5; // half width of the road strip between blocks
 const GROUND_SEAM_GAP = 0.02; // keeps the road plane from z-fighting with sidewalks/buildings
 const CURB_HEIGHT = 0.18;    // sidewalk slab height — also its real physics curb now
 export const CITY_HALF = (GRID_N * BLOCK_PITCH) / 2;
@@ -49,8 +49,11 @@ export function buildCity(THREE, CANNON, world, scene) {
         gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
       }`,
   });
-  scene.add(new THREE.Mesh(skyGeo, skyMat));
-  scene.fog = new THREE.FogExp2(0xd68a5c, 0.0038);
+  const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skyMesh);
+  // Slightly thinner than before (0.0038) — the city footprint grew with
+  // GRID_N, and the old density fogged out most of the new far blocks.
+  scene.fog = new THREE.FogExp2(0xd68a5c, 0.0028);
 
   // A scatter of stars in the upper sky — cheap atmosphere for the dusk/night look.
   {
@@ -83,12 +86,16 @@ export function buildCity(THREE, CANNON, world, scene) {
   sun.position.set(-140, 120, -80);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -160;
-  sun.shadow.camera.right = 160;
-  sun.shadow.camera.top = 160;
-  sun.shadow.camera.bottom = -160;
+  // Bounds scale with the city (CITY_HALF grew from 119 to 170 with the
+  // bigger grid) so the far edge of the map still gets real shadows instead
+  // of just going flat/unshadowed past the old, smaller frustum.
+  const shadowHalf = CITY_HALF + 50;
+  sun.shadow.camera.left = -shadowHalf;
+  sun.shadow.camera.right = shadowHalf;
+  sun.shadow.camera.top = shadowHalf;
+  sun.shadow.camera.bottom = -shadowHalf;
   sun.shadow.camera.near = 10;
-  sun.shadow.camera.far = 400;
+  sun.shadow.camera.far = shadowHalf * 3;
   sun.shadow.bias = -0.0015;
   scene.add(sun);
   scene.add(sun.target);
@@ -263,7 +270,10 @@ export function buildCity(THREE, CANNON, world, scene) {
     propSpots.push({ x: rand(-CITY_HALF * 0.6, CITY_HALF * 0.6), z: rand(-CITY_HALF * 0.6, CITY_HALF * 0.6) });
   }
 
-  return { group, spawnPoints, propSpots, cityHalf: CITY_HALF, sun, buildingBodies, footprints };
+  return {
+    group, spawnPoints, propSpots, cityHalf: CITY_HALF, sun, buildingBodies, footprints, streetCoords,
+    hemi, skyMat, groundMat,
+  };
 }
 // (helpers kept below)
 
