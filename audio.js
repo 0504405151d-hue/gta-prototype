@@ -45,18 +45,37 @@ export class AudioSystem {
     for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
     this.noiseBuffer = buffer;
 
-    // --- engine drone: a sawtooth run through a lowpass, pitch = f(speed) ---
+    // --- engine drone: pitch = f(speed) ---
+    // Used to be a single raw sawtooth through a lowpass. A lone sawtooth is
+    // a harsh, harmonic-heavy waveform — it reads as a whiny buzz rather
+    // than an engine note, and that's exactly the kind of sound that gets
+    // "annoying" over a long play session since it's playing continuously.
+    // Blending in a quieter detuned triangle (a much simpler waveform, few
+    // harmonics) fills out a rounder "purr" underneath the sawtooth's growl
+    // without losing the growl entirely, and a lower filter Q avoids an
+    // extra resonant spike right at the cutoff that would otherwise add its
+    // own buzziness on top.
     const engineOsc = ctx.createOscillator();
     engineOsc.type = 'sawtooth';
     engineOsc.frequency.value = 40;
+    const engineOsc2 = ctx.createOscillator();
+    engineOsc2.type = 'triangle';
+    engineOsc2.frequency.value = 40.4; // tiny detune for thickness, not enough to beat audibly
+    const engineGain2 = ctx.createGain();
+    engineGain2.gain.value = 0.45; // triangle sits under the sawtooth, not equal to it
     const engineFilter = ctx.createBiquadFilter();
     engineFilter.type = 'lowpass';
     engineFilter.frequency.value = 500;
+    engineFilter.Q.value = 0.5; // was the default (~1) — smoother roll-off, no resonant peak
     const engineGain = ctx.createGain();
     engineGain.gain.value = 0.0;
-    engineOsc.connect(engineFilter).connect(engineGain).connect(masterGain);
+    engineOsc.connect(engineFilter);
+    engineOsc2.connect(engineGain2).connect(engineFilter);
+    engineFilter.connect(engineGain).connect(masterGain);
     engineOsc.start();
+    engineOsc2.start();
     this.engineOsc = engineOsc;
+    this.engineOsc2 = engineOsc2;
     this.engineFilter = engineFilter;
     this.engineGain = engineGain;
 
@@ -66,11 +85,14 @@ export class AudioSystem {
     screechSrc.loop = true;
     const screechFilter = ctx.createBiquadFilter();
     screechFilter.type = 'bandpass';
-    screechFilter.frequency.value = 1800;
-    screechFilter.Q.value = 0.7;
+    screechFilter.frequency.value = 1500; // was 1800 — a little less shrill/piercing
+    screechFilter.Q.value = 0.5; // was 0.7 — less resonant, smoother squeal instead of a sharp whistle
+    const screechTone = ctx.createBiquadFilter();
+    screechTone.type = 'lowpass';
+    screechTone.frequency.value = 3200; // rounds off the very top so it reads as a tire squeal, not hiss
     const screechGain = ctx.createGain();
     screechGain.gain.value = 0;
-    screechSrc.connect(screechFilter).connect(screechGain).connect(masterGain);
+    screechSrc.connect(screechFilter).connect(screechTone).connect(screechGain).connect(masterGain);
     screechSrc.start();
     this.screechGain = screechGain;
 
@@ -85,7 +107,11 @@ export class AudioSystem {
     const freq = 40 + rpm * 160;
     const vol = 0.05 + Math.min(1, Math.abs(speedMs) / 25) * 0.05 + throttleMag * 0.05;
     this.engineOsc.frequency.setTargetAtTime(freq, now, 0.08);
-    this.engineFilter.frequency.setTargetAtTime(300 + rpm * 1800, now, 0.1);
+    this.engineOsc2.frequency.setTargetAtTime(freq * 1.01, now, 0.08);
+    // Ceiling lowered from 300+rpm*1800 — keeps the loudest, buzziest upper
+    // harmonics a bit more contained at high rpm instead of opening all the
+    // way up into harsh territory.
+    this.engineFilter.frequency.setTargetAtTime(280 + rpm * 1400, now, 0.1);
     this.engineGain.gain.setTargetAtTime(vol, now, 0.1);
   }
 
@@ -93,25 +119,68 @@ export class AudioSystem {
   updateScreech(amount) {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    this.screechGain.gain.setTargetAtTime(amount * 0.16, now, 0.05);
+    this.screechGain.gain.setTargetAtTime(amount * 0.12, now, 0.05); // was 0.16 — quieter ceiling, less piercing during a hard drift
   }
 
   /** strength: 0..1 impact severity. */
   playImpact(strength = 0.5) {
     if (!this.ready) return;
     const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Repeated impacts in quick succession — scraping the side of the car
+    // along a wall is the common case — used to each play at full,
+    // near-identical volume and tone: a rapid machine-gun of identical
+    // "thunks" is exactly the kind of sound that reads as grating rather
+    // than as one continuous scrape. Track how recently the last impact
+    // fired and duck each subsequent one further (recovering once hits stop
+    // for ~0.6s) so a sustained scrape fades into a softer texture instead
+    // of hammering at full strength the whole time.
+    const sinceLast = this._lastImpactTime != null ? now - this._lastImpactTime : 999;
+    this._lastImpactTime = now;
+    this._repeatFatigue = sinceLast > 0.6 ? 0 : Math.min(0.75, (this._repeatFatigue || 0) + 0.22);
+    const fatigueMul = 1 - this._repeatFatigue;
+
     const src = ctx.createBufferSource();
     src.buffer = this.noiseBuffer;
+    // Small per-hit pitch variation so a burst of repeated impacts doesn't
+    // sound like the exact same sample looping, which reads as mechanical.
+    src.playbackRate.value = 0.85 + Math.random() * 0.3;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 400 + strength * 800;
+    filter.frequency.value = 320 + strength * 550; // was 400 + strength*800 — darker/thuddier, less sharp "clack"
+    filter.Q.value = 0.5;
     const gain = ctx.createGain();
-    const vol = 0.15 + strength * 0.5;
-    gain.gain.setValueAtTime(vol, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+    const vol = (0.11 + strength * 0.35) * fatigueMul; // ceiling lowered from 0.15 + strength*0.5
+    gain.gain.setValueAtTime(vol, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
     src.connect(filter).connect(gain).connect(this.masterGain);
     src.start();
-    src.stop(ctx.currentTime + 0.3);
+    src.stop(now + 0.3);
+  }
+
+  /** Distant rumble for weather lightning strikes (see weather.js). Unlike
+   * playImpact() this swells in rather than hitting instantly, is pitched
+   * way down into rumble territory, and rings out much longer — a thunder
+   * clap reads completely differently from a car-crash thud, so it deserves
+   * its own shape rather than reusing playImpact() with different numbers. */
+  playThunder() {
+    if (!this.ready) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.playbackRate.value = 0.35 + Math.random() * 0.15; // slowed way down from the impact/screech noise for a deep rumble, not a hiss
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 220;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.22, now + 0.25); // slow swell, not an instant hit — real thunder builds
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 2.2);
+    src.connect(filter).connect(gain).connect(this.masterGain);
+    src.start();
+    src.stop(now + 2.3);
   }
 
   /** Toggles master volume; returns the new muted state. Safe before resume(). */

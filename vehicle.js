@@ -16,6 +16,25 @@ const DENT_MAX_PUSH = 0.22;
 const DENT_SPEED_THRESHOLD = 3.2;
 const CHASSIS_Y_OFFSET = 0.4; // how far the collision box sits above the body origin (wheel-mount height)
 const ANTI_ROLL_STIFFNESS = 9000; // empirically tuned in a headless test — see fix notes below
+// Anti-wheelie safety net (see _applyPitchSafety below). Threshold is ~7°:
+// a headless full-vehicle simulation showed normal driving at this project's
+// real maxForce values (1000-1320, no turbo) only ever pitches ~0.03-0.04
+// rad under hard acceleration, so this never touches ordinary gameplay. It
+// only engages once the nose is visibly lifting.
+const PITCH_SAFETY_THRESHOLD = 0.12;
+// Damping-only, not a spring: a headless test of a proportional (-pitch)
+// restoring torque looked correct in isolation (a bare-body torque test)
+// but caused a *worse* outcome once combined with the real RaycastVehicle's
+// suspension — the correction pushed the lifted end back down hard enough
+// for the suspension to kick the whole chassis into the air, turning a
+// 0.63 rad wheelie into an uncontrolled tumble up past 5 units off the
+// ground. Pure damping (opposing only the current pitch *rotation speed*,
+// never adding a restoring force of its own) can only ever remove
+// rotational energy, so the same test harness confirmed it stays bounded
+// (~0.7-0.76 rad max, car settles back near normal ride height) across
+// every force level tried, including well past this project's real
+// turbo-mode ceiling.
+const PITCH_SAFETY_DAMPING = 1500;
 // Hard velocity cap (~230 km/h) — mainly there for the admin panel's turbo
 // mode (2.2x engine force with no matching cap before this): ramming a wall
 // at an unbounded turbo speed could keep re-triggering hard collisions every
@@ -205,7 +224,16 @@ export class Vehicle {
 
     const windshieldLen = chassisL * 0.17;
     const windshieldZ = chassisL / 2 - hoodLen - 0.2 - windshieldLen * 0.32;
-    const windshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, windshieldLen), glassMat);
+    // Front/rear glass used to share one glassMat instance, which meant
+    // there was no way to visibly crack just the windshield on front-impact
+    // damage without also cracking the rear glass on a rear hit — cloned so
+    // _applyCrumple() below can darken/frost each pane independently based
+    // on the damage that end of the car actually took.
+    const windshieldMat = glassMat.clone();
+    this.windshieldMat = windshieldMat;
+    const rearGlassMat = glassMat.clone();
+    this.rearGlassMat = rearGlassMat;
+    const windshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, windshieldLen), windshieldMat);
     windshield.position.set(0, bodyTopY + 0.24, windshieldZ);
     windshield.rotation.x = 0.62; // raked
     group.add(windshield);
@@ -219,7 +247,7 @@ export class Vehicle {
 
     const rearWindshieldLen = chassisL * 0.15;
     const rearWindshieldZ = roofZ - roofLen / 2 - rearWindshieldLen * 0.32;
-    const rearWindshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, rearWindshieldLen), glassMat);
+    const rearWindshield = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.78, 0.05, rearWindshieldLen), rearGlassMat);
     rearWindshield.position.set(0, bodyTopY + 0.22, rearWindshieldZ);
     rearWindshield.rotation.x = -0.58;
     group.add(rearWindshield);
@@ -271,6 +299,41 @@ export class Vehicle {
       mirror.position.set(side * (chassisW / 2 + 0.06), 0.72, chassisL * 0.12);
       mirror.castShadow = true;
       group.add(mirror);
+    });
+
+    // Round-4 polish pass ("make the cars as good-looking as the UFO easter
+    // egg"): the UFO's appeal isn't a wilder material — it's clean chrome
+    // trim reading crisply against the paint, plus small glowing accents.
+    // Cranking the body's own reflectivity back up would just re-introduce
+    // the exact glare that round 2/3 already had to tone down, so the win
+    // here is added, cheap-but-legible detail instead: a chrome cowl strip
+    // and roof drip rails (real cars have a visible seam/trim right where
+    // glass meets metal — this procedural body just had glass floating
+    // directly against paint with nothing framing it), chrome door handles,
+    // and slim white LED-style daytime-running-light strips under the
+    // headlights, which is exactly what makes a modern real car's front end
+    // read as "premium" at a glance.
+    const cowlTrim = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.8, 0.03, 0.05), chromeMat);
+    cowlTrim.position.set(0, bodyTopY + 0.135, windshieldZ + windshieldLen / 2);
+    group.add(cowlTrim);
+
+    [-1, 1].forEach((side) => {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.03, roofLen + 0.1), chromeMat);
+      rail.position.set(side * (chassisW * 0.76 / 2), bodyTopY + 0.62, roofZ);
+      group.add(rail);
+    });
+
+    [-1, 1].forEach((side) => {
+      const handle = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 0.22), chromeMat);
+      handle.position.set(side * (chassisW / 2 + 0.015), 0.58, 0.1);
+      group.add(handle);
+    });
+
+    const drlMat = new THREE.MeshStandardMaterial({ color: 0xeaf6ff, emissive: 0xcfeeff, emissiveIntensity: 1.8 });
+    [-0.6, 0.6].forEach((x) => {
+      const drl = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.025, 0.04), drlMat);
+      drl.position.set(x, 0.335, chassisL / 2 - 0.05);
+      group.add(drl);
     });
 
     // Rear spoiler on two struts — small, but exactly the kind of silhouette
@@ -425,7 +488,16 @@ export class Vehicle {
     v.applyEngineForce(engineForce, 2);
     v.applyEngineForce(engineForce, 3);
 
-    const steerValue = steer * this.maxSteer;
+    // Same class of bug as the engineForce sign above, found the same way
+    // (a standalone headless cannon-es simulation, not guessing): with this
+    // project's axis config (indexForwardAxis=2, nose at local/world +Z),
+    // "right" for a car facing +Z is world −X (right = forward × up =
+    // Z × Y = −X in a right-handed system) — but a POSITIVE
+    // setSteeringValue on the front wheels was verified to swing the nose
+    // toward +X, i.e. the car's own LEFT. readInput() sends steer=+1 for
+    // "turn right" (D/→), so that has to produce a NEGATIVE steering value
+    // here, or right/left were swapped for every player the whole time.
+    const steerValue = -steer * this.maxSteer;
     v.setSteeringValue(steerValue, 0);
     v.setSteeringValue(steerValue, 1);
 
@@ -436,6 +508,7 @@ export class Vehicle {
     }
 
     this._applyAntiRoll();
+    this._applyPitchSafety();
 
     // Hard top-speed cap — see MAX_SPEED_MS above.
     const speed = this.chassisBody.velocity.length();
@@ -447,7 +520,10 @@ export class Vehicle {
     // fixed glow all the time — a small thing, but it's the difference
     // between "a car with red spheres on the back" and a car that reads as
     // driven.
-    this.tailMat.emissiveIntensity = handbrake ? 3.4 : 1.4;
+    // Scaled down by rear damage too — a smashed tail light shouldn't keep
+    // glowing at full brightness (or full brake-light flare) just because
+    // this line runs every frame regardless of damage state.
+    this.tailMat.emissiveIntensity = (handbrake ? 3.4 : 1.4) * (1 - Math.min(1, this.rearDamage) * 0.85);
 
     // sync visuals
     const chassis = this.chassisBody;
@@ -494,6 +570,15 @@ export class Vehicle {
    * mesh is built above. Called every time frontDamage/rearDamage change so
    * the visible crumple always matches the current damage total exactly,
    * instead of drifting from repeated relative nudges.
+   *
+   * Round-4 addition ("improve destruction further"): the crumple used to
+   * be the ONLY thing that changed with damage — a heavily wrecked car
+   * still had a perfectly clear windshield and full-brightness lights,
+   * which reads as "dented" rather than "wrecked". Past ~60% damage on
+   * either end this now also frosts that end's glass (cracked-windshield
+   * look: darker, much rougher, so it scatters light instead of showing a
+   * clean reflection) and knocks out that end's lights, scaled smoothly by
+   * damage rather than snapping instantly at the threshold.
    */
   _applyCrumple() {
     const f = this.frontDamage, r = this.rearDamage;
@@ -505,6 +590,31 @@ export class Vehicle {
     this.trunkMesh.position.y = this._trunkBase.y - r * 0.12;
     this.rearBumperMesh.position.z = this._rearBumperBase.z + r * 0.2;
     this.rearBumperMesh.rotation.x = this._rearBumperBase.rotX - r * 0.3;
+
+    const crackAmount = (dmg) => Math.max(0, (dmg - 0.6) / 0.4); // 0 below 60% damage, ramps to 1 by 100%
+    const frontCrack = crackAmount(f);
+    const rearCrack = crackAmount(r);
+    this.windshieldMat.roughness = 0.18 + frontCrack * 0.7;
+    this.windshieldMat.clearcoat = 0.35 * (1 - frontCrack);
+    this.windshieldMat.color.setRGB(0.04 + frontCrack * 0.1, 0.06 + frontCrack * 0.1, 0.09 + frontCrack * 0.1);
+    this.rearGlassMat.roughness = 0.18 + rearCrack * 0.7;
+    this.rearGlassMat.clearcoat = 0.35 * (1 - rearCrack);
+    this.rearGlassMat.color.setRGB(0.04 + rearCrack * 0.1, 0.06 + rearCrack * 0.1, 0.09 + rearCrack * 0.1);
+
+    this._refreshHeadlightGlow();
+  }
+
+  /** Headlight brightness is a function of BOTH the driver's H-key toggle
+   * (setHeadlightsOn) and front-end damage — a heavily wrecked nose reads as
+   * "the headlight is smashed", not "still shining fine through a crumpled
+   * bumper". Kept as its own method since both of those need to re-apply it
+   * independently without knowing about each other's state. */
+  _refreshHeadlightGlow() {
+    const on = this._headlightsOn;
+    const brokenMul = 1 - Math.min(1, this.frontDamage) * 0.85;
+    this.lightMat.emissiveIntensity = (on ? 3 : 0.15) * brokenMul;
+    this.lightMat.emissive.setHex(on ? 0xfff2c0 : 0x2a2418);
+    if (this.headBeam) this.headBeam.intensity = on ? 5 * brokenMul : 0;
   }
 
   /**
@@ -526,6 +636,53 @@ export class Vehicle {
       this.chassisBody.applyForce(new this.CANNON.Vec3(0, -forceMag, 0), wL.raycastResult.hitPointWorld);
       this.chassisBody.applyForce(new this.CANNON.Vec3(0, forceMag, 0), wR.raycastResult.hitPointWorld);
     }
+  }
+
+  /**
+   * Anti-wheelie safety net for "hard acceleration rears the car up and it
+   * flips" reports. Only engages while at least one axle is fully grounded
+   * (same grounded-only caveat as _applyAntiRoll — see its comment; guessing
+   * a correction while airborne is what causes flips, not what prevents
+   * them) and only once pitch has actually crossed PITCH_SAFETY_THRESHOLD,
+   * so normal driving (measured ~0.03-0.04 rad even at this project's real
+   * max engine force) is never touched.
+   *
+   * Applies pure damping against the chassis's own current pitch rotation
+   * speed — not a spring pulling it back to level. Verified by a standalone
+   * headless simulation (full RaycastVehicle + suspension, not a bare body)
+   * that a spring-style restoring torque actively made things worse: it
+   * shoved the lifted end back down hard enough for the suspension to
+   * relaunch the whole chassis into an uncontrolled tumble. Damping can only
+   * remove rotational energy, never add it, so the same test harness showed
+   * it keeps pitch bounded well short of a flip (roughly 0.7-0.76 rad peak)
+   * across every engine-force level tried, well past this project's real
+   * turbo-mode ceiling.
+   */
+  _applyPitchSafety() {
+    const v = this.vehicle;
+    const rearGrounded = v.wheelInfos[2].isInContact && v.wheelInfos[3].isInContact;
+    const frontGrounded = v.wheelInfos[0].isInContact && v.wheelInfos[1].isInContact;
+    if (!rearGrounded && !frontGrounded) return;
+
+    const q = this.chassisBody.quaternion;
+    // Same YXZ-order pitch extraction this project's building-overlap fix
+    // uses (THREE.Euler(...,'YXZ').x), reproduced here without needing a
+    // THREE.Quaternion so this stays a plain math check. Verified sign via
+    // headless test: positive pitch = nose DOWN, negative = nose UP (a
+    // wheelie), for this chassis's local +Z-is-the-nose convention.
+    const pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q.x * q.w - q.y * q.z))));
+    if (Math.abs(pitch) < PITCH_SAFETY_THRESHOLD) return;
+
+    const rightLocal = new this.CANNON.Vec3(1, 0, 0);
+    const rightWorld = new this.CANNON.Vec3();
+    q.vmult(rightLocal, rightWorld);
+
+    const av = this.chassisBody.angularVelocity;
+    const pitchRate = av.x * rightWorld.x + av.y * rightWorld.y + av.z * rightWorld.z;
+    const dampMag = -pitchRate * PITCH_SAFETY_DAMPING;
+    this.chassisBody.applyTorque(new this.CANNON.Vec3(
+      rightWorld.x * dampMag, rightWorld.y * dampMag, rightWorld.z * dampMag
+    ));
   }
 
   /**
@@ -690,8 +847,7 @@ export class Vehicle {
   setHeadlightsOn(on) {
     this._headlightsOn = on;
     this.headBeam.visible = on;
-    this.lightMat.emissiveIntensity = on ? 3 : 0.15;
-    this.lightMat.emissive.setHex(on ? 0xfff2c0 : 0x2a2418);
+    this._refreshHeadlightGlow();
   }
 }
 
@@ -718,6 +874,66 @@ export class RemoteCar {
     );
     cabin.position.set(0, 0.65, -0.15);
     group.add(cabin);
+
+    // Round-4 polish pass: other connected players' cars used to be just
+    // this bare box + cabin + wheels — no lights, no trim at all, noticeably
+    // cruder than even the AI traffic cars. Brought up to the same level of
+    // detail (bumpers/mirrors/handles/drip-rails merged into one trim mesh,
+    // chrome cowl+rails in another, head/tail lights in a third pair) using
+    // the exact same merged-geometry approach traffic.js uses, since a
+    // multiplayer game can have several of these on screen at once and each
+    // one is a full draw-call multiplier.
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x121317, roughness: 0.55, metalness: 0.7 });
+    const trimGeos = [];
+    const fbGeo = new THREE.BoxGeometry(1.86, 0.26, 0.22);
+    fbGeo.translate(0, 0.29, 1.97);
+    trimGeos.push(fbGeo);
+    const rbGeo = new THREE.BoxGeometry(1.86, 0.26, 0.22);
+    rbGeo.translate(0, 0.29, -1.97);
+    trimGeos.push(rbGeo);
+    [-1, 1].forEach((side) => {
+      const mGeo = new THREE.BoxGeometry(0.16, 0.12, 0.26);
+      mGeo.translate(side * 1.01, 0.9, 0.5);
+      trimGeos.push(mGeo);
+      const hGeo = new THREE.BoxGeometry(0.05, 0.045, 0.22);
+      hGeo.translate(side * 0.965, 0.6, 0.08);
+      trimGeos.push(hGeo);
+    });
+    group.add(new THREE.Mesh(mergeGeometries(trimGeos), trimMat));
+    trimGeos.forEach((g) => g.dispose());
+
+    const chromeTrimMat = new THREE.MeshStandardMaterial({ color: 0xc7cbd1, roughness: 0.4, metalness: 0.85, envMapIntensity: 0.6 });
+    const chromeGeos = [];
+    const cowlGeo = new THREE.BoxGeometry(1.5, 0.03, 0.05);
+    cowlGeo.translate(0, 0.9, 0.65);
+    chromeGeos.push(cowlGeo);
+    [-1, 1].forEach((side) => {
+      const railGeo = new THREE.BoxGeometry(0.035, 0.03, 2.1);
+      railGeo.translate(side * 0.78, 1.16, -0.15);
+      chromeGeos.push(railGeo);
+    });
+    group.add(new THREE.Mesh(mergeGeometries(chromeGeos), chromeTrimMat));
+    chromeGeos.forEach((g) => g.dispose());
+
+    const headMat = new THREE.MeshStandardMaterial({ color: 0xfff6dd, emissive: 0xfff2c0, emissiveIntensity: 2.2 });
+    const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.2 });
+    const headGeos = [];
+    const tailGeos = [];
+    [-0.6, 0.6].forEach((x) => {
+      const hlGeo = new THREE.SphereGeometry(0.08, 8, 8);
+      hlGeo.translate(x, 0.42, 2.05);
+      headGeos.push(hlGeo);
+      const drlGeo = new THREE.BoxGeometry(0.2, 0.022, 0.04);
+      drlGeo.translate(x, 0.3, 2.05);
+      headGeos.push(drlGeo);
+      const tlGeo = new THREE.SphereGeometry(0.07, 8, 8);
+      tlGeo.translate(x, 0.42, -2.05);
+      tailGeos.push(tlGeo);
+    });
+    group.add(new THREE.Mesh(mergeGeometries(headGeos), headMat));
+    headGeos.forEach((g) => g.dispose());
+    group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
+    tailGeos.forEach((g) => g.dispose());
     // Static wheels (no per-wheel telemetry travels over the network for
     // remote players, so these don't spin/steer) — still much better than a
     // body floating with no wheels at all. Two-tone (tire + rim disc) to

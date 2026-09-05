@@ -178,7 +178,7 @@ const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords
 });
 
 setBootProgress(70, 'Настраиваем погоду…');
-const weather = new WeatherSystem(THREE, scene, city, city.groundMat);
+const weather = new WeatherSystem(THREE, scene, city, city.groundMat, audio);
 weather.set(settings.weather);
 
 setBootProgress(80, 'Готовим машину…');
@@ -648,9 +648,11 @@ function readInput() {
   let throttle = 0;
   if (fwd) throttle -= 1;
   if (back) throttle += 1;
-  // Verified against the underlying cannon-es RaycastVehicle convention:
-  // a positive steering value turns the car to the right, so "left" must
-  // send a negative value here.
+  // steer is just an input-side "which way did the player ask to turn"
+  // value (right = +1, left = -1) — the actual sign flip needed to make
+  // that produce the correct wheel turn under this project's cannon-es axis
+  // convention lives in vehicle.js's update(), verified there by a
+  // standalone headless simulation rather than assumed here.
   let steer = 0;
   if (left) steer -= 1;
   if (right) steer += 1;
@@ -688,8 +690,8 @@ function respawnCar() {
 // idea as the out-of-bounds/NaN check below, just for "inside a wall"
 // specifically.
 //
-// Two bugs found and fixed here by this project's own smoke test, not by
-// guessing:
+// Bugs found and fixed here by this project's own smoke test and by direct
+// user reports, not by guessing:
 // 1) No vertical gate at all originally — a car launched briefly airborne
 //    by a hard collision (exactly what a turbo-mode ram into a wall does)
 //    would still register as "inside" any building whose XZ footprint it
@@ -698,33 +700,26 @@ function respawnCar() {
 //    into a runaway multi-hundred-meter teleport within about a second.
 //    That's now gated by comparing p.y against the building's own height
 //    (footprints carry `h` — see city.js).
-// 2) No cap on the correction distance — even grounded, a bad SAT read on
-//    one particular axis could in principle produce a large one-frame
-//    "correction". Capped at MAX_OVERLAP_CORRECTION per building per frame
-//    (the standard "max linear correction" pattern used by real physics
-//    engines, e.g. Box2D's b2_maxLinearCorrection) so a deep overlap gets
-//    resolved gradually over a few frames instead of ever teleporting.
-// Large enough to fully clear even a worst-case deep embedding (bounded by
-// building half-extents, well under this) in a single frame rather than
-// dragging a multi-second string of small corrections out — see the
-// OVERLAP_FIX_MAX_SPEED note above: this project's own smoke test showed
-// that stretching the fix over many frames while other systems (dent/
-// crumple/effects) were also actively reacting to the still-ongoing overlap
-// was itself what destabilized things, not the size of any single push.
-const MAX_OVERLAP_CORRECTION = 20;
-// Above ordinary city-driving speed, back off entirely and leave it to
-// cannon-es's own contact resolution (which is exactly what handled this
-// fine, including turbo-mode wall rams, for the whole rest of this
-// project's development). Found via this project's own smoke test: a
-// sustained turbo-mode ram straight into a wall — nothing an ordinary
-// player does, but exactly what the admin panel's turbo mode enables —
-// combined with this correction running every frame produced a compounding
-// instability (repeatedly yanking the chassis while suspension/contact
-// forces were still actively fighting over the same collision) that ended
-// in the test browser becoming unresponsive. A real, normal-speed "clipped
-// slightly into a wall" moment — the actual bug this function targets — is
-// well under this speed anyway.
-const OVERLAP_FIX_MAX_SPEED = 22; // ~80 km/h
+// 2) The correction distance used to be capped at 20 (to fully clear even a
+//    worst-case deep embedding in one frame). That size cap combined with a
+//    now-removed high-speed cutoff (see #3) turned out to be exactly what
+//    produced the "sometimes teleports back to the start" reports: a large
+//    enough one-frame correction could itself look and feel like a
+//    teleport, and occasionally push the chassis into the out-of-bounds/NaN
+//    safety net's own territory below. Shrunk to MAX_OVERLAP_CORRECTION — a
+//    deep overlap now resolves gently over a couple of frames instead of a
+//    single big snap (the standard "max linear correction" pattern real
+//    physics engines use, e.g. Box2D's b2_maxLinearCorrection).
+// 3) An earlier version of this fix also disabled itself entirely above
+//    ~80 km/h "to be safe" — backwards. Tunneling through a wall is
+//    specifically a HIGH-speed problem (a fast-enough body can cross an
+//    entire thin wall within one physics step); disabling the fix exactly
+//    when it was needed left real "I still fly through houses" gameplay
+//    unfixed. The turbo-mode exclusion at the call site below is the
+//    correct, narrower guard for the actual instability that was found (a
+//    deliberate admin-cheat sustained wall ram, not normal fast driving) —
+//    there's no separate speed gate here anymore.
+const MAX_OVERLAP_CORRECTION = 2.5;
 
 // Reused every call instead of allocated fresh — resolveBuildingOverlap runs
 // unconditionally every single frame of normal driving (not just during a
@@ -744,7 +739,6 @@ function _axisOverlap(ax, az, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, 
 }
 
 function resolveBuildingOverlap(carBody, dims, footprints) {
-  if (carBody.velocity.length() > OVERLAP_FIX_MAX_SPEED) return;
   const p = carBody.position;
   const halfW = dims.chassisW / 2 + 0.08; // small margin so it settles just outside, not exactly flush
   const halfL = dims.chassisL / 2 + 0.08;
@@ -1182,10 +1176,9 @@ function loop(now) {
   // multiplies engine force well past anything a normal drive produces, and
   // this project's own smoke test caught it fighting this correction into
   // an unstable state when used to ram a wall on purpose (see
-  // resolveBuildingOverlap's own comment for the two real bugs already
-  // fixed there, and OVERLAP_FIX_MAX_SPEED for the speed half of this same
-  // defensive gating). The anti-tunneling fix this exists for — a normal
-  // drive clipping into a building — doesn't involve turbo mode at all.
+  // resolveBuildingOverlap's own comment for the bugs already fixed there).
+  // The anti-tunneling fix this exists for — a normal drive clipping into a
+  // building, at any normal driving speed — doesn't involve turbo mode at all.
   if (!turboMode) resolveBuildingOverlap(car.chassisBody, car.dims, city.footprints);
 
   // Safety net for the admin panel's turbo mode stacked with the "moon"

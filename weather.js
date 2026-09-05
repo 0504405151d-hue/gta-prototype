@@ -2,12 +2,32 @@
 // discrete looks the player can pick from the settings/phone UI: sun
 // intensity + color, fog density, sky gradient, a rain particle effect, and
 // a "wet road" material tweak (glossier, less rough) while it's raining.
+//
+// Round-4 realism pass ("сделай погоду реалистичнее"): three concrete gaps
+// from the original version, each independently fixable —
+//  1) Switching weather used to SNAP every value (sun, fog, sky, road
+//     wetness) instantly the frame the player picked a new preset from
+//     settings. Real weather never changes in a single frame; this now
+//     eases every value from its current live state to the new preset's
+//     target over a few seconds (see the transition fields on
+//     WeatherSystem / its update()).
+//  2) Rain fell perfectly straight down, uniformly, with no wind at all —
+//     visually a "special effect" rather than actual weather. Drops now
+//     fall along a fixed wind-angled vector (tilted instances, drifting
+//     x/z) instead of straight down.
+//  3) Rain had no weather "event" texture to it — real rainstorms include
+//     the occasional lightning flash + delayed thunder rumble. Added as a
+//     low-probability random trigger while the 'rain' preset is active.
 
 import { rand } from './utils.js';
 
 const RAIN_COUNT = 500;
 const RAIN_VOLUME = { x: 70, y: 45, z: 70 };
 const RAIN_FALL_SPEED = 30;
+// Horizontal drift while falling — real rain essentially never falls
+// perfectly straight down; even a light breeze visibly slants it. This is
+// what turns "particles moving down" into "wind-blown rain".
+const WIND = { x: 6, z: 3.5 };
 
 function buildRain(THREE) {
   const geo = new THREE.CylinderGeometry(0.012, 0.012, 0.55, 4);
@@ -24,9 +44,18 @@ function buildRain(THREE) {
     });
   }
   const dummy = new THREE.Object3D();
+  // One shared tilt for every drop, computed once from the fall+wind vector
+  // (a cylinder's own axis is Y by default, so this is the rotation that
+  // takes "pointing up" to "pointing along the direction the rain is
+  // actually falling"). Real wind-blown rain all slants the same way at
+  // any given moment, so sharing one quaternion across all 500 instances is
+  // both correct and far cheaper than computing 500 individual ones.
+  const fallDir = new THREE.Vector3(WIND.x, -RAIN_FALL_SPEED, WIND.z).normalize();
+  const tiltQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), fallDir.clone().negate());
   function sync() {
     for (let i = 0; i < RAIN_COUNT; i++) {
       dummy.position.set(drops[i].x, drops[i].y, drops[i].z);
+      dummy.quaternion.copy(tiltQuat);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
     }
@@ -38,7 +67,18 @@ function buildRain(THREE) {
     update(dt, followPos) {
       for (const d of drops) {
         d.y -= RAIN_FALL_SPEED * dt;
-        if (d.y < -2) d.y = RAIN_VOLUME.y;
+        d.x += WIND.x * dt;
+        d.z += WIND.z * dt;
+        if (d.y < -2) {
+          // Reseed the whole position (not just y) — letting x/z keep
+          // drifting from wind forever would eventually walk every drop
+          // outside the volume; a real rainstorm looks the same everywhere
+          // within it, so a fresh random spot reads identically to letting
+          // the old one keep falling.
+          d.y = RAIN_VOLUME.y;
+          d.x = rand(-RAIN_VOLUME.x / 2, RAIN_VOLUME.x / 2);
+          d.z = rand(-RAIN_VOLUME.z / 2, RAIN_VOLUME.z / 2);
+        }
       }
       mesh.position.set(followPos.x, 0, followPos.z);
       sync();
@@ -55,14 +95,20 @@ const PRESETS = {
 
 export const WEATHER_NAMES = { clear: 'Ясно', cloudy: 'Облачно', rain: 'Дождь', night: 'Ночь' };
 
+const TRANSITION_DURATION = 3.5; // seconds to ease between presets, instead of snapping
+
 export class WeatherSystem {
-  constructor(THREE, scene, city, roadMat) {
+  // `audio`: optional AudioSystem instance (see audio.js's playThunder) —
+  // when provided, a rain-weather lightning strike also plays a delayed
+  // thunder rumble; entirely optional so this class still works standalone.
+  constructor(THREE, scene, city, roadMat, audio = null) {
     this.THREE = THREE;
     this.scene = scene;
     this.sun = city.sun;
     this.hemi = city.hemi;
     this.skyMat = city.skyMat;
     this.roadMat = roadMat;
+    this.audio = audio;
 
     this.base = {
       sunI: this.sun.intensity,
@@ -82,25 +128,115 @@ export class WeatherSystem {
     this.rain = buildRain(THREE);
     scene.add(this.rain.mesh);
 
+    this._t = 1;
+    this._from = null;
+    this._to = null;
+    this._flashT = 0;
+    this._flashDur = 0;
+    this._lightningCooldown = rand(5, 14);
+
     this.current = 'clear';
-    this.set('clear');
+    this.set('clear', true);
   }
 
-  set(name) {
+  _presetValues(name) {
     const p = PRESETS[name] || PRESETS.clear;
-    this.current = PRESETS[name] ? name : 'clear';
-    this.sun.intensity = this.base.sunI * p.sunMul;
-    this.scene.fog.density = this.base.fogD * p.fogMul;
-    this.hemi.intensity = this.base.hemiI * p.hemiMul;
     const sky = this.skyTargets[p.sky] || this.skyTargets.clear;
-    this.skyMat.uniforms.topColor.value.copy(sky.top);
-    this.skyMat.uniforms.bottomColor.value.copy(sky.bottom);
-    this.roadMat.roughness = p.wet ? Math.max(0.12, this.base.roadRough * 0.3) : this.base.roadRough;
-    this.roadMat.envMapIntensity = p.wet ? 1.7 : this.base.roadEnv;
-    this.rain.mesh.visible = p.rain;
+    return {
+      sunI: this.base.sunI * p.sunMul,
+      fogD: this.base.fogD * p.fogMul,
+      hemiI: this.base.hemiI * p.hemiMul,
+      top: sky.top,
+      bottom: sky.bottom,
+      roadRough: p.wet ? Math.max(0.12, this.base.roadRough * 0.3) : this.base.roadRough,
+      roadEnv: p.wet ? 1.7 : this.base.roadEnv,
+      rain: p.rain,
+    };
+  }
+
+  _applyValues(v) {
+    this.sun.intensity = v.sunI;
+    this.scene.fog.density = v.fogD;
+    this.hemi.intensity = v.hemiI;
+    this.skyMat.uniforms.topColor.value.copy(v.top);
+    this.skyMat.uniforms.bottomColor.value.copy(v.bottom);
+    this.roadMat.roughness = v.roadRough;
+    this.roadMat.envMapIntensity = v.roadEnv;
+  }
+
+  /** `instant`: skip the fade (used for the very first call, at construction,
+   * before the scene is ever shown to the player — nothing to ease from). */
+  set(name, instant = false) {
+    const target = this._presetValues(name);
+    this.current = PRESETS[name] ? name : 'clear';
+    this._from = {
+      sunI: this.sun.intensity,
+      fogD: this.scene.fog.density,
+      hemiI: this.hemi.intensity,
+      top: this.skyMat.uniforms.topColor.value.clone(),
+      bottom: this.skyMat.uniforms.bottomColor.value.clone(),
+      roadRough: this.roadMat.roughness,
+      roadEnv: this.roadMat.envMapIntensity ?? 1,
+    };
+    this._to = target;
+    this._t = instant ? 1 : 0;
+    // Rain visibility turns on immediately at the START of a transition
+    // INTO rain (so drops are already falling as the sky darkens toward
+    // it) but only turns off once a transition AWAY from rain finishes
+    // (so it doesn't just vanish mid-fade while everything's still wet).
+    if (target.rain) this.rain.mesh.visible = true;
+    this._rainFadeOut = !target.rain;
+    if (instant) {
+      this._applyValues(target);
+      if (!target.rain) this.rain.mesh.visible = false;
+    }
   }
 
   update(dt, followPos) {
+    if (this._t < 1) {
+      this._t = Math.min(1, this._t + dt / TRANSITION_DURATION);
+      const s = this._t;
+      const lerp = (a, b) => a + (b - a) * s;
+      this.sun.intensity = lerp(this._from.sunI, this._to.sunI);
+      this.scene.fog.density = lerp(this._from.fogD, this._to.fogD);
+      this.hemi.intensity = lerp(this._from.hemiI, this._to.hemiI);
+      this.skyMat.uniforms.topColor.value.copy(this._from.top).lerp(this._to.top, s);
+      this.skyMat.uniforms.bottomColor.value.copy(this._from.bottom).lerp(this._to.bottom, s);
+      this.roadMat.roughness = lerp(this._from.roadRough, this._to.roadRough);
+      this.roadMat.envMapIntensity = lerp(this._from.roadEnv, this._to.roadEnv);
+      if (this._t >= 1 && this._rainFadeOut) this.rain.mesh.visible = false;
+    }
+
     if (this.rain.mesh.visible) this.rain.update(dt, followPos);
+
+    // Lightning: only while actually raining, on a random multi-second
+    // cooldown so strikes feel occasional rather than metronomic.
+    if (this.current === 'rain') {
+      this._lightningCooldown -= dt;
+      if (this._lightningCooldown <= 0) {
+        this._triggerLightning();
+        this._lightningCooldown = rand(6, 18);
+      }
+    }
+    if (this._flashT > 0) {
+      this._flashT = Math.max(0, this._flashT - dt);
+      // Quick bright spike that decays back to the current target values —
+      // written AFTER the transition lerp above so a flash during an
+      // in-progress fade still reads correctly on top of it.
+      const k = this._flashT / this._flashDur;
+      this.hemi.intensity = this._to.hemiI * (1 + k * k * 5);
+      this.sun.intensity = this._to.sunI + (this.base.sunI - this._to.sunI) * k * 0.7;
+    }
+  }
+
+  _triggerLightning() {
+    this._flashDur = 0.1 + Math.random() * 0.12;
+    this._flashT = this._flashDur;
+    if (this.audio && typeof this.audio.playThunder === 'function') {
+      // Thunder arrives after the flash, not with it — the delay stands in
+      // for "the strike is some distance away", same as real lightning.
+      const delayMs = (0.4 + Math.random() * 2.4) * 1000;
+      setTimeout(() => this.audio.playThunder(), delayMs);
+    }
   }
 }

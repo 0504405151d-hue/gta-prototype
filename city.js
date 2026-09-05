@@ -244,12 +244,26 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
   const streetCoords = [];
   for (let i = 0; i <= GRID_N; i++) streetCoords.push((i - half - 0.5) * BLOCK_PITCH);
 
+  // Streetlights used to sit exactly on the intersection coordinate, i.e.
+  // planted dead in the middle of the crossing — visually wrong (a real
+  // pole stands on the sidewalk corner, not in the road) and reported as
+  // such. Push each one out past the curb (ROAD_HALF_WIDTH) onto the
+  // sidewalk strip, at one of the intersection's four corners. Which corner
+  // alternates with the grid's (i, j) parity so poles end up on varied
+  // corners around the city instead of all leaning the same direction.
+  const streetlightCornerOffset = ROAD_HALF_WIDTH + 0.9;
   for (let i = 0; i <= GRID_N; i++) {
     for (let j = 0; j <= GRID_N; j++) {
       if ((i + j) % 2 !== 0) continue; // sparse, for perf
       const x = streetCoords[i];
       const z = streetCoords[j];
-      addStreetlight(THREE, group, x, z);
+      const sx = (i % 2 === 0) ? 1 : -1;
+      const sz = (j % 2 === 0) ? 1 : -1;
+      // Arm swings back toward the intersection center so the lamp still
+      // overhangs the road/crossing (like a real streetlight) instead of
+      // hanging out over the sidewalk/building behind the pole.
+      const armAngle = Math.atan2(-sz, -sx);
+      addStreetlight(THREE, group, x + sx * streetlightCornerOffset, z + sz * streetlightCornerOffset, armAngle);
     }
   }
 
@@ -473,25 +487,39 @@ function addCrosswalks(THREE, group, streetCoords, groundSeamGap) {
   group.add(instNS, instEW);
 }
 
-function addStreetlight(THREE, group, x, z) {
+function addStreetlight(THREE, group, x, z, armAngleRad = 0) {
   const poleMat = new THREE.MeshStandardMaterial({ color: 0x1c1e24, roughness: 0.5, metalness: 0.6 });
   const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 6, 8), poleMat);
   pole.position.set(x, 3, z);
   pole.castShadow = true;
   group.add(pole);
 
+  // The arm/lamp/light used to be built straight along world +X, which was
+  // fine back when the pole always stood at the intersection center (any
+  // direction "toward the crossing" looked the same, more or less). Now
+  // that poles sit off to a corner (see the call site), the arm needs to
+  // actually swing toward the road it's lighting instead of always +X — so
+  // it's built inside a pivot Object3D rotated by armAngleRad, with the arm
+  // and lamp positioned in the pivot's local space exactly as they used to
+  // be positioned in world space at angle 0 (reproduces the old look/height
+  // exactly when armAngleRad is 0).
+  const armPivot = new THREE.Object3D();
+  armPivot.position.set(x, 5.9, z);
+  armPivot.rotation.y = armAngleRad;
+  group.add(armPivot);
+
   const armLen = 1.4;
   const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, armLen, 6), poleMat);
   arm.rotation.z = Math.PI / 2;
-  arm.position.set(x + armLen / 2, 5.9, z);
-  group.add(arm);
+  arm.position.set(armLen / 2, 0, 0);
+  armPivot.add(arm);
 
   const lampMat = new THREE.MeshStandardMaterial({ color: 0xffdca0, emissive: 0xffb347, emissiveIntensity: 2.2, roughness: 0.4 });
   const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), lampMat);
-  lamp.position.set(x + armLen, 5.75, z);
-  group.add(lamp);
+  lamp.position.set(armLen, -0.15, 0); // -0.15 matches the old 5.9 -> 5.75 drop
+  armPivot.add(lamp);
 
   const light = new THREE.PointLight(0xffb066, 6, 16, 2);
   light.position.copy(lamp.position);
-  group.add(light);
+  armPivot.add(light);
 }

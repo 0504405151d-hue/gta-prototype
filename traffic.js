@@ -62,9 +62,37 @@ function buildTrafficCarMesh(THREE, color) {
     mGeo.translate(side * (CAR_W / 2 + 0.05), CAR_H * 0.58, CAR_L * 0.14);
     trimGeos.push(mGeo);
   });
+  // Round-4 polish pass ("NPC cars should look as good as the player's/the
+  // UFO"): door handles folded into this SAME merged mesh (still one draw
+  // call, same trick this file already uses for bumpers+mirrors) rather
+  // than a chrome material change — a dark plastic handle reads fine at
+  // traffic-car viewing distance and keeps the chrome material reserved for
+  // the rim discs, so this doesn't cost anything extra to draw.
+  [-1, 1].forEach((side) => {
+    const hGeo = new THREE.BoxGeometry(0.05, 0.045, 0.22);
+    hGeo.translate(side * (CAR_W / 2 + 0.015), CAR_H * 0.46, CAR_L * 0.02);
+    trimGeos.push(hGeo);
+  });
   const trimMesh = new THREE.Mesh(mergeGeometries(trimGeos), trimMat);
   group.add(trimMesh);
   trimGeos.forEach((g) => g.dispose());
+
+  // Chrome cowl strip (where windshield meets the body) + roof drip rails —
+  // same "frame the glass instead of leaving it floating against paint"
+  // detail added to the player's own car this round. Merged into its own
+  // single chrome mesh, so still just +1 draw call per traffic car.
+  const chromeTrimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
+  const chromeGeos = [];
+  const cowlGeo = new THREE.BoxGeometry(CAR_W * 0.72, 0.03, 0.05);
+  cowlGeo.translate(0, CAR_H * 0.47, -CAR_L * 0.05 + CAR_L * 0.24);
+  chromeGeos.push(cowlGeo);
+  [-1, 1].forEach((side) => {
+    const railGeo = new THREE.BoxGeometry(0.035, 0.03, CAR_L * 0.48 + 0.1);
+    railGeo.translate(side * (CAR_W * 0.8 / 2), CAR_H * 0.9, -CAR_L * 0.05);
+    chromeGeos.push(railGeo);
+  });
+  group.add(new THREE.Mesh(mergeGeometries(chromeGeos), chromeTrimMat));
+  chromeGeos.forEach((g) => g.dispose());
 
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
   const rimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
@@ -85,17 +113,29 @@ function buildTrafficCarMesh(THREE, color) {
   rimGeos.forEach((g) => g.dispose());
   // Fake (non-lit) head/tail lamps — an actual light source per traffic car
   // would tank performance with a dozen+ of them on screen, so these are
-  // emissive-only, just like the parked cars.
+  // emissive-only, just like the parked cars. Round-4: added a slim DRL
+  // strip under each headlight (the "premium modern car" tell the player's
+  // own car just got) — merged into the SAME mesh as the headlight spheres
+  // so this is still exactly one draw call for the front lights, not two.
   const headMat = new THREE.MeshStandardMaterial({ color: 0xfff6dd, emissive: 0xfff2c0, emissiveIntensity: 2.2 });
   const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.2 });
+  const headGeos = [];
+  const tailGeos = [];
   [-0.6, 0.6].forEach((x) => {
-    const hl = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), headMat);
-    hl.position.set(x, 0.42, CAR_L / 2 - 0.05);
-    group.add(hl);
-    const tl = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), tailMat);
-    tl.position.set(x, 0.42, -CAR_L / 2 + 0.05);
-    group.add(tl);
+    const hlGeo = new THREE.SphereGeometry(0.08, 8, 8);
+    hlGeo.translate(x, 0.42, CAR_L / 2 - 0.05);
+    headGeos.push(hlGeo);
+    const drlGeo = new THREE.BoxGeometry(0.2, 0.022, 0.04);
+    drlGeo.translate(x, 0.3, CAR_L / 2 - 0.05);
+    headGeos.push(drlGeo);
+    const tlGeo = new THREE.SphereGeometry(0.07, 8, 8);
+    tlGeo.translate(x, 0.42, -CAR_L / 2 + 0.05);
+    tailGeos.push(tlGeo);
   });
+  group.add(new THREE.Mesh(mergeGeometries(headGeos), headMat));
+  headGeos.forEach((g) => g.dispose());
+  group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
+  tailGeos.forEach((g) => g.dispose());
   return { group, bodyMat };
 }
 
