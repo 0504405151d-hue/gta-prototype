@@ -20,22 +20,49 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 const CAR_W = 1.9, CAR_H = 1.3, CAR_L = 4.2;
 const TRAFFIC_COLORS = [0x2b6fd8, 0xd0d0d6, 0x1a1c22, 0xb32020, 0xd7a52c, 0x2f7d4a, 0x6b6f76];
 
-function buildTrafficCarMesh(THREE, color) {
+// Round 6 ("make NPC cars as detailed/realistic as the player's own"):
+// traffic used to be a single generic sedan-shaped box for every car on the
+// road, just recolored — every one of a dozen+ cars on screen had the exact
+// same silhouette. Four real body proportions now get picked per spawn (see
+// _spawnCar), the same idea as the player's own sedan/sport/suv/truck/bus
+// choice in carPresets.js, just simplified enough to stay cheap at
+// dozen-plus-on-screen scale (see the draw-call notes further down).
+const CAR_STYLES = {
+  sedan: { w: 1.9, h: 1.3, l: 4.2, cabinWFrac: 0.8, cabinHFrac: 0.42, cabinLFrac: 0.48, cabinZFrac: -0.05 },
+  suv: { w: 2.0, h: 1.6, l: 4.5, cabinWFrac: 0.86, cabinHFrac: 0.56, cabinLFrac: 0.64, cabinZFrac: -0.02 },
+  van: { w: 2.05, h: 1.9, l: 5.1, cabinWFrac: 0.94, cabinHFrac: 0.76, cabinLFrac: 0.88, cabinZFrac: -0.02 },
+  minibus: { w: 2.1, h: 2.05, l: 6.4, cabinWFrac: 0.94, cabinHFrac: 0.8, cabinLFrac: 0.92, cabinZFrac: -0.01 },
+};
+const CAR_STYLE_KEYS = Object.keys(CAR_STYLES);
+
+function buildTrafficCarMesh(THREE, color, styleKey) {
+  const style = CAR_STYLES[styleKey] || CAR_STYLES.sedan;
+  const W = style.w, H = style.h, L = style.l;
   const group = new THREE.Group();
   // Round-3 glare pass: same clearcoat/roughness/envMapIntensity softening
   // applied to the player's own paint (see vehicle.js) — traffic paint was
   // just as mirror-hot in direct sun as the player car used to be.
   const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.46, metalness: 0.55, clearcoat: 0.65, clearcoatRoughness: 0.55, envMapIntensity: 0.5 });
-  const base = new THREE.Mesh(new THREE.BoxGeometry(CAR_W, CAR_H * 0.5, CAR_L), bodyMat);
-  base.position.y = CAR_H * 0.32;
+  const base = new THREE.Mesh(new THREE.BoxGeometry(W, H * 0.5, L), bodyMat);
+  base.position.y = H * 0.32;
   base.castShadow = true;
   base.receiveShadow = true;
   group.add(base);
+  // Round-6: this used to be a flat matte-dark box standing in for the
+  // whole greenhouse (windshield + side glass + rear glass all as one
+  // opaque panel — basically "2 cubes" up close, the same complaint that
+  // hit the multiplayer remote-car bug this round). Same geometry/position,
+  // but now an actually glass-like transparent/tinted physical material —
+  // it catches highlights and reads as real glass instead of a dark block.
+  const cabinMat = new THREE.MeshPhysicalMaterial({
+    color: 0x0b1622, roughness: 0.12, metalness: 0.05, transparent: true, opacity: 0.62,
+    clearcoat: 0.55, clearcoatRoughness: 0.2, envMapIntensity: 0.9,
+  });
   const cabin = new THREE.Mesh(
-    new THREE.BoxGeometry(CAR_W * 0.8, CAR_H * 0.42, CAR_L * 0.48),
-    new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.2, metalness: 0.15, clearcoat: 0.3, clearcoatRoughness: 0.45, envMapIntensity: 0.5 })
+    new THREE.BoxGeometry(W * style.cabinWFrac, H * style.cabinHFrac, L * style.cabinLFrac),
+    cabinMat
   );
-  cabin.position.set(0, CAR_H * 0.68, -CAR_L * 0.05);
+  cabin.position.set(0, H * 0.68, L * style.cabinZFrac);
   cabin.castShadow = true;
   group.add(cabin);
 
@@ -51,15 +78,15 @@ function buildTrafficCarMesh(THREE, color) {
   // same visual detail at 2 extra draw calls per car instead of 8.
   const trimMat = new THREE.MeshStandardMaterial({ color: 0x121317, roughness: 0.55, metalness: 0.7 });
   const trimGeos = [];
-  const fbGeo = new THREE.BoxGeometry(CAR_W * 0.98, CAR_H * 0.2, 0.22);
-  fbGeo.translate(0, CAR_H * 0.22, CAR_L / 2 - 0.13);
+  const fbGeo = new THREE.BoxGeometry(W * 0.98, H * 0.2, 0.22);
+  fbGeo.translate(0, H * 0.22, L / 2 - 0.13);
   trimGeos.push(fbGeo);
-  const rbGeo = new THREE.BoxGeometry(CAR_W * 0.98, CAR_H * 0.2, 0.22);
-  rbGeo.translate(0, CAR_H * 0.22, -CAR_L / 2 + 0.13);
+  const rbGeo = new THREE.BoxGeometry(W * 0.98, H * 0.2, 0.22);
+  rbGeo.translate(0, H * 0.22, -L / 2 + 0.13);
   trimGeos.push(rbGeo);
   [-1, 1].forEach((side) => {
     const mGeo = new THREE.BoxGeometry(0.14, 0.1, 0.22);
-    mGeo.translate(side * (CAR_W / 2 + 0.05), CAR_H * 0.58, CAR_L * 0.14);
+    mGeo.translate(side * (W / 2 + 0.05), H * 0.58, L * 0.14);
     trimGeos.push(mGeo);
   });
   // Round-4 polish pass ("NPC cars should look as good as the player's/the
@@ -70,8 +97,26 @@ function buildTrafficCarMesh(THREE, color) {
   // the rim discs, so this doesn't cost anything extra to draw.
   [-1, 1].forEach((side) => {
     const hGeo = new THREE.BoxGeometry(0.05, 0.045, 0.22);
-    hGeo.translate(side * (CAR_W / 2 + 0.015), CAR_H * 0.46, CAR_L * 0.02);
+    hGeo.translate(side * (W / 2 + 0.015), H * 0.46, L * 0.02);
     trimGeos.push(hGeo);
+  });
+  // Round-6: A/C-pillars framing the now-actually-glass cabin (see cabinMat
+  // above) — thin dark posts at the four corners of the greenhouse, folded
+  // into this same merged mesh so they're still free (no extra draw call).
+  // Without these the glass just floats edge-to-edge against the paint,
+  // which reads flat; real pillars are what makes it look like a window
+  // instead of a tinted panel.
+  const cabinHalfW = (W * style.cabinWFrac) / 2;
+  const cabinFrontZ = L * style.cabinZFrac + (L * style.cabinLFrac) / 2;
+  const cabinRearZ = L * style.cabinZFrac - (L * style.cabinLFrac) / 2;
+  const cabinTopY = H * 0.68 + (H * style.cabinHFrac) / 2;
+  [-1, 1].forEach((side) => {
+    const aPillar = new THREE.BoxGeometry(0.06, H * style.cabinHFrac, 0.06);
+    aPillar.translate(side * cabinHalfW, H * 0.68, cabinFrontZ);
+    trimGeos.push(aPillar);
+    const cPillar = new THREE.BoxGeometry(0.06, H * style.cabinHFrac, 0.06);
+    cPillar.translate(side * cabinHalfW, H * 0.68, cabinRearZ);
+    trimGeos.push(cPillar);
   });
   const trimMesh = new THREE.Mesh(mergeGeometries(trimGeos), trimMat);
   group.add(trimMesh);
@@ -83,12 +128,12 @@ function buildTrafficCarMesh(THREE, color) {
   // single chrome mesh, so still just +1 draw call per traffic car.
   const chromeTrimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
   const chromeGeos = [];
-  const cowlGeo = new THREE.BoxGeometry(CAR_W * 0.72, 0.03, 0.05);
-  cowlGeo.translate(0, CAR_H * 0.47, -CAR_L * 0.05 + CAR_L * 0.24);
+  const cowlGeo = new THREE.BoxGeometry(W * style.cabinWFrac * 0.9, 0.03, 0.05);
+  cowlGeo.translate(0, H * 0.68 - (H * style.cabinHFrac) / 2, cabinFrontZ);
   chromeGeos.push(cowlGeo);
   [-1, 1].forEach((side) => {
-    const railGeo = new THREE.BoxGeometry(0.035, 0.03, CAR_L * 0.48 + 0.1);
-    railGeo.translate(side * (CAR_W * 0.8 / 2), CAR_H * 0.9, -CAR_L * 0.05);
+    const railGeo = new THREE.BoxGeometry(0.035, 0.03, L * style.cabinLFrac + 0.1);
+    railGeo.translate(side * cabinHalfW, cabinTopY, L * style.cabinZFrac);
     chromeGeos.push(railGeo);
   });
   group.add(new THREE.Mesh(mergeGeometries(chromeGeos), chromeTrimMat));
@@ -96,16 +141,17 @@ function buildTrafficCarMesh(THREE, color) {
 
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
   const rimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
-  const wheelSpots = [[-CAR_W / 2, CAR_L / 2 - 0.7], [CAR_W / 2, CAR_L / 2 - 0.7], [-CAR_W / 2, -CAR_L / 2 + 0.6], [CAR_W / 2, -CAR_L / 2 + 0.6]];
+  const wheelRadius = Math.min(0.44, 0.34 + (H - 1.3) * 0.1);
+  const wheelSpots = [[-W / 2, L / 2 - 0.7], [W / 2, L / 2 - 0.7], [-W / 2, -L / 2 + 0.6], [W / 2, -L / 2 + 0.6]];
   const rimGeos = [];
   wheelSpots.forEach(([wx, wz]) => {
-    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.28, 14), wheelMat);
+    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.28, 14), wheelMat);
     wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, 0.34, wz);
+    wheel.position.set(wx, wheelRadius, wz);
     group.add(wheel);
-    const rGeo = new THREE.CylinderGeometry(0.19, 0.19, 0.3, 12);
+    const rGeo = new THREE.CylinderGeometry(wheelRadius * 0.56, wheelRadius * 0.56, 0.3, 12);
     rGeo.rotateZ(Math.PI / 2);
-    rGeo.translate(wx, 0.34, wz);
+    rGeo.translate(wx, wheelRadius, wz);
     rimGeos.push(rGeo);
   });
   const rimMesh = new THREE.Mesh(mergeGeometries(rimGeos), rimMat);
@@ -121,22 +167,22 @@ function buildTrafficCarMesh(THREE, color) {
   const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2222, emissiveIntensity: 1.2 });
   const headGeos = [];
   const tailGeos = [];
-  [-0.6, 0.6].forEach((x) => {
+  [-W * 0.32, W * 0.32].forEach((x) => {
     const hlGeo = new THREE.SphereGeometry(0.08, 8, 8);
-    hlGeo.translate(x, 0.42, CAR_L / 2 - 0.05);
+    hlGeo.translate(x, 0.42, L / 2 - 0.05);
     headGeos.push(hlGeo);
     const drlGeo = new THREE.BoxGeometry(0.2, 0.022, 0.04);
-    drlGeo.translate(x, 0.3, CAR_L / 2 - 0.05);
+    drlGeo.translate(x, 0.3, L / 2 - 0.05);
     headGeos.push(drlGeo);
     const tlGeo = new THREE.SphereGeometry(0.07, 8, 8);
-    tlGeo.translate(x, 0.42, -CAR_L / 2 + 0.05);
+    tlGeo.translate(x, 0.42, -L / 2 + 0.05);
     tailGeos.push(tlGeo);
   });
   group.add(new THREE.Mesh(mergeGeometries(headGeos), headMat));
   headGeos.forEach((g) => g.dispose());
   group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
   tailGeos.forEach((g) => g.dispose());
-  return { group, bodyMat };
+  return { group, bodyMat, dims: { w: W, h: H, l: L } };
 }
 
 // Four axis-aligned directions in street-grid INDEX space (exactly one of
@@ -185,16 +231,17 @@ export class TrafficSystem {
     const dirs = this._validDirs(ix, iz, null);
     const dir = choice(dirs);
     const color = choice(TRAFFIC_COLORS);
+    const styleKey = choice(CAR_STYLE_KEYS);
 
-    const { group: mesh, bodyMat } = buildTrafficCarMesh(this.THREE, color);
+    const { group: mesh, bodyMat, dims } = buildTrafficCarMesh(this.THREE, color, styleKey);
     this.scene.add(mesh);
 
-    const shape = new this.CANNON.Box(new this.CANNON.Vec3(CAR_W / 2, CAR_H / 2, CAR_L / 2));
+    const shape = new this.CANNON.Box(new this.CANNON.Vec3(dims.w / 2, dims.h / 2, dims.l / 2));
     const body = new this.CANNON.Body({ mass: 0, type: this.CANNON.Body.KINEMATIC, shape });
     this.world.addBody(body);
 
     const car = {
-      mesh, body, bodyMat, baseColor: color,
+      mesh, body, bodyMat, baseColor: color, dims,
       ix, iz, dx: dir.dx, dz: dir.dz,
       t: rand(0, 1),
       speed: rand(4.5, 8),
@@ -229,7 +276,7 @@ export class TrafficSystem {
     const yaw = Math.atan2(car.dx, car.dz);
     car.mesh.position.set(x, 0, z);
     car.mesh.rotation.y = yaw;
-    car.body.position.set(x, CAR_H / 2, z);
+    car.body.position.set(x, car.dims.h / 2, z);
     car.body.quaternion.setFromEuler(0, yaw, 0);
   }
 
@@ -296,7 +343,7 @@ export class TrafficSystem {
     const yaw = Math.hypot(tx, tz) > 1e-4 ? Math.atan2(tx, tz) : car.mesh.rotation.y;
     car.mesh.position.set(x, 0, z);
     car.mesh.rotation.y = yaw;
-    car.body.position.set(x, CAR_H / 2, z);
+    car.body.position.set(x, car.dims.h / 2, z);
     car.body.quaternion.setFromEuler(0, yaw, 0);
   }
 

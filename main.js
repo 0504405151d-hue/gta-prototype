@@ -19,6 +19,15 @@ import { WeatherSystem } from './weather.js';
 import { CAR_PRESETS, CAR_COLORS } from './carPresets.js';
 import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 
+// Round 6: a visible build marker (bottom-right corner, plus shown per-player
+// in the online list — see spawnRemote/refreshPlayerList below) so two
+// people can actually SEE whether they're both on the same deployed build
+// instead of guessing from symptoms like "your car looks different to me".
+// Bump this string whenever a round of changes ships.
+export const GAME_VERSION = 'r6 · 2026-09-06';
+const versionTagEl = document.getElementById('versionTag');
+if (versionTagEl) versionTagEl.textContent = `City Drive ${GAME_VERSION}`;
+
 const settings = loadSettings();
 
 // Shadow-map resolution per graphics tier — read at boot (city.js's sun is
@@ -220,6 +229,10 @@ setBootProgress(100, 'Готово');
 // ---------------------------------------------------------------------------
 let godMode = false;
 let turboMode = false;
+// Round 6: spectate/follow — a purely client-side camera feature (see
+// updateCamera below), no server involvement needed since the admin already
+// receives everyone's state updates over the network regardless.
+let spectateTargetId = null;
 
 function applyAdminStateToCar() {
   car.godMode = godMode;
@@ -342,6 +355,16 @@ function addChatMessage(msg) {
 function sendChatText(text) {
   const trimmed = text.trim().slice(0, 140);
   if (!trimmed) return;
+  // Round 6: an admin-muted player used to still see their OWN message
+  // appear locally (this function echoes it immediately, before any server
+  // round trip) even though the server silently dropped it — so muting
+  // looked broken from both sides. Check locally too, not just rely on the
+  // server's drop, so the sender gets instant feedback instead of a message
+  // that looks sent but nobody else ever saw.
+  if (amIMuted) {
+    setNetStatus('Вы в муте — сообщение не отправлено');
+    return;
+  }
   net.sendChat(trimmed);
   addChatMessage({ id: net.id, name: myName, color: myColor, text: trimmed });
   triggerEasterEgg(trimmed);
@@ -543,18 +566,49 @@ document.getElementById('applyCarBtn').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Admin/debug panel (~ key) — see the state vars + applyAdminStateToCar()
 // declared up near where `car` is first built.
+//
+// Round 6: this used to open straight into the tools with no gate at all,
+// and nothing in it had any effect beyond the local browser tab (see
+// network.js's history — there was no network message for any of it). It's
+// now password-gated — checked server-side in server.js's 'adminLogin'
+// handler, so a modified client sending the raw adminKick/adminBan/etc.
+// messages without ever passing that check still gets ignored there — and
+// the tools include real moderation (kick/ban/mute) and a give-money
+// economy that actually reach other players, on top of the pre-existing
+// local-only god-mode/turbo/teleport/traffic toggles.
 // ---------------------------------------------------------------------------
 let adminOpen = false;
+let isAdminAuthed = false;
 const adminOverlayEl = document.getElementById('adminOverlay');
+const adminLoginCardEl = document.getElementById('adminLoginCard');
+const adminToolsCardEl = document.getElementById('adminToolsCard');
+const adminPasswordInputEl = document.getElementById('adminPasswordInput');
+const adminLoginErrorEl = document.getElementById('adminLoginError');
 const adminGodEl = document.getElementById('adminGod');
 const adminTurboEl = document.getElementById('adminTurbo');
+const adminSelfMoneyEl = document.getElementById('adminSelfMoney');
+const adminSelfMoneyInputEl = document.getElementById('adminSelfMoneyInput');
+const adminPlayerListEl = document.getElementById('adminPlayerList');
+const spectateBannerEl = document.getElementById('spectateBanner');
+const spectateBannerTextEl = document.getElementById('spectateBannerText');
 
 function setAdmin(v) {
   adminOpen = v;
   adminOverlayEl.style.display = v ? 'flex' : 'none';
-  if (v) {
-    adminGodEl.checked = godMode;
-    adminTurboEl.checked = turboMode;
+  if (!v) return;
+  adminGodEl.checked = godMode;
+  adminTurboEl.checked = turboMode;
+  adminLoginErrorEl.textContent = '';
+  if (isAdminAuthed) {
+    adminLoginCardEl.style.display = 'none';
+    adminToolsCardEl.style.display = 'block';
+    adminSelfMoneyEl.textContent = myMoney;
+    renderAdminPlayerList();
+  } else {
+    adminLoginCardEl.style.display = 'block';
+    adminToolsCardEl.style.display = 'none';
+    adminPasswordInputEl.value = '';
+    setTimeout(() => adminPasswordInputEl.focus(), 0);
   }
 }
 adminGodEl.addEventListener('change', () => {
@@ -579,6 +633,165 @@ document.getElementById('adminResetPropsBtn').addEventListener('click', () => {
   destructibles.resetField(city.propSpots);
 });
 document.getElementById('adminCloseBtn').addEventListener('click', () => setAdmin(false));
+
+document.getElementById('adminLoginBtn').addEventListener('click', () => {
+  const pw = adminPasswordInputEl.value;
+  if (!pw) return;
+  adminLoginErrorEl.textContent = 'Проверка…';
+  net.adminLogin(pw);
+});
+adminPasswordInputEl.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') document.getElementById('adminLoginBtn').click();
+});
+document.getElementById('adminLoginCancelBtn').addEventListener('click', () => setAdmin(false));
+document.getElementById('adminLogoutBtn').addEventListener('click', () => {
+  // "стать обратно обычным игроком" — logging out clears the SERVER-side
+  // isAdmin flag (so adminKick/etc. sent from this tab would be ignored
+  // from now on even if replayed) AND the local god-mode/turbo cheats;
+  // otherwise you'd still be driving an indestructible turbo car with no
+  // admin badge, which isn't "a normal player" in anything but name.
+  net.adminLogout();
+  isAdminAuthed = false;
+  godMode = false;
+  turboMode = false;
+  applyAdminStateToCar();
+  stopSpectating();
+  setAdmin(false);
+  setNetStatus('Вы вышли из админ-режима — снова обычный игрок');
+});
+document.getElementById('adminSelfMoneyBtn').addEventListener('click', () => {
+  const amount = Number(adminSelfMoneyInputEl.value);
+  if (!Number.isFinite(amount) || !net.id) return;
+  net.adminGiveMoney(net.id, amount);
+});
+
+function playerDisplayName(id) {
+  return playerNames.get(id) || `Игрок ${id}`;
+}
+
+// A "click again to confirm" button instead of a native confirm() dialog —
+// confirm()/alert() block the whole tab (including this game's own render
+// loop) until dismissed, which is a bad way to gate a ban button in a
+// real-time game.
+function makeConfirmButton(label, confirmLabel, className, onConfirm) {
+  const btn = document.createElement('button');
+  if (className) btn.className = className;
+  btn.textContent = label;
+  let armed = false;
+  let armTimer = null;
+  btn.addEventListener('click', () => {
+    if (!armed) {
+      armed = true;
+      btn.textContent = confirmLabel;
+      clearTimeout(armTimer);
+      armTimer = setTimeout(() => {
+        armed = false;
+        btn.textContent = label;
+      }, 3000);
+      return;
+    }
+    armed = false;
+    clearTimeout(armTimer);
+    btn.textContent = label;
+    onConfirm();
+  });
+  return btn;
+}
+
+function renderAdminPlayerList() {
+  if (!isAdminAuthed) return;
+  adminSelfMoneyEl.textContent = myMoney;
+  adminPlayerListEl.innerHTML = '';
+  if (remoteCars.size === 0) {
+    adminPlayerListEl.innerHTML = '<div class="empty">Пока нет других игроков</div>';
+    return;
+  }
+  for (const id of remoteCars.keys()) {
+    const row = document.createElement('div');
+    row.className = 'adminPlayerRow';
+
+    const nameRow = document.createElement('div');
+    nameRow.className = 'nameRow';
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = playerDisplayName(id);
+    nameRow.appendChild(nameSpan);
+    const version = playerVersions.get(id);
+    if (version && version !== GAME_VERSION) {
+      const tag = document.createElement('span');
+      tag.className = 'tag mismatch';
+      tag.textContent = `⚠ ${version}`;
+      tag.title = `У вас: ${GAME_VERSION}`;
+      nameRow.appendChild(tag);
+    }
+    if (playerMuted.get(id)) {
+      const tag = document.createElement('span');
+      tag.className = 'tag muted';
+      tag.textContent = '🔇 мут';
+      nameRow.appendChild(tag);
+    }
+    const moneyTag = document.createElement('span');
+    moneyTag.className = 'tag';
+    moneyTag.textContent = `💰${playerMoney.get(id) ?? 0}`;
+    nameRow.appendChild(moneyTag);
+    row.appendChild(nameRow);
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'btnRow';
+
+    const kickBtn = document.createElement('button');
+    kickBtn.textContent = 'Кик';
+    kickBtn.addEventListener('click', () => net.adminKick(id));
+    btnRow.appendChild(kickBtn);
+
+    btnRow.appendChild(makeConfirmButton('Бан', 'Точно?', 'danger', () => net.adminBan(id)));
+
+    const muted = !!playerMuted.get(id);
+    const muteBtn = document.createElement('button');
+    muteBtn.textContent = muted ? 'Размутить' : 'Мут';
+    muteBtn.addEventListener('click', () => net.adminMute(id, !muted));
+    btnRow.appendChild(muteBtn);
+
+    const spectateBtn = document.createElement('button');
+    spectateBtn.textContent = spectateTargetId === id ? '👁 Стоп' : '👁 Следить';
+    spectateBtn.addEventListener('click', () => {
+      if (spectateTargetId === id) stopSpectating();
+      else startSpectating(id);
+    });
+    btnRow.appendChild(spectateBtn);
+
+    const moneyInput = document.createElement('input');
+    moneyInput.type = 'number';
+    moneyInput.value = '1000';
+    moneyInput.step = '100';
+    btnRow.appendChild(moneyInput);
+
+    const giveBtn = document.createElement('button');
+    giveBtn.textContent = 'Дать $';
+    giveBtn.addEventListener('click', () => {
+      const amount = Number(moneyInput.value);
+      if (Number.isFinite(amount)) net.adminGiveMoney(id, amount);
+    });
+    btnRow.appendChild(giveBtn);
+
+    row.appendChild(btnRow);
+    adminPlayerListEl.appendChild(row);
+  }
+}
+
+function startSpectating(id) {
+  if (!remoteCars.has(id)) return;
+  spectateTargetId = id;
+  spectateBannerTextEl.textContent = `👁 Слежка за игроком: ${playerDisplayName(id)}`;
+  spectateBannerEl.style.display = 'flex';
+  renderAdminPlayerList();
+}
+function stopSpectating() {
+  if (spectateTargetId === null) return;
+  spectateTargetId = null;
+  spectateBannerEl.style.display = 'none';
+  renderAdminPlayerList();
+}
+document.getElementById('spectateStopBtn').addEventListener('click', stopSpectating);
 
 // ---------------------------------------------------------------------------
 // Free-fly camera: mouse-look (pointer lock) + WASD/QE flight, independent of
@@ -848,7 +1061,14 @@ function getTrafficObstacles() {
 // ---------------------------------------------------------------------------
 const remoteCars = new Map(); // id -> RemoteCar
 const playerNames = new Map();
+// Round 6: version sync + economy/moderation state, all mirroring the exact
+// id-keyed Map pattern playerNames already used.
+const playerVersions = new Map(); // id -> version string
+const playerMoney = new Map();    // id -> money (other players)
+const playerMuted = new Map();    // id -> bool
 let myName = '';
+let myMoney = 0;
+let amIMuted = false;
 
 const net = new Network({
   onWelcome(msg) {
@@ -857,11 +1077,15 @@ const net = new Network({
     for (const p of msg.players) {
       spawnRemote(p.id, p.color, p.carId, p.state);
       if (p.name) playerNames.set(p.id, p.name);
+      if (p.version) playerVersions.set(p.id, p.version);
+      if (typeof p.money === 'number') playerMoney.set(p.id, p.money);
+      if (p.muted) playerMuted.set(p.id, true);
     }
     // Catch up on world destruction that happened before we joined.
     for (const id of msg.shatteredIds || []) destructibles.applyRemoteShatter(id);
     for (const r of msg.propRest || []) destructibles.applyRemoteRest(r.id, r.p, r.q);
     refreshPlayerList();
+    renderAdminPlayerList();
     setNetStatus(`В сети: вы + ${msg.players.length}`);
   },
   onJoin(msg) {
@@ -871,6 +1095,7 @@ const net = new Network({
     // 'car' message below arrives and (if needed) rebuilds it.
     spawnRemote(msg.id, msg.color, null, null);
     refreshPlayerList();
+    renderAdminPlayerList();
   },
   onLeave(msg) {
     const rc = remoteCars.get(msg.id);
@@ -879,7 +1104,12 @@ const net = new Network({
       remoteCars.delete(msg.id);
     }
     playerNames.delete(msg.id);
+    playerVersions.delete(msg.id);
+    playerMoney.delete(msg.id);
+    playerMuted.delete(msg.id);
+    if (spectateTargetId === msg.id) stopSpectating();
     refreshPlayerList();
+    renderAdminPlayerList();
   },
   onState(msg) {
     const rc = remoteCars.get(msg.id);
@@ -887,6 +1117,81 @@ const net = new Network({
   },
   onName(msg) {
     playerNames.set(msg.id, msg.name);
+    refreshPlayerList();
+    renderAdminPlayerList();
+  },
+  // Round 6: version sync — lets two players actually SEE a build mismatch
+  // (highlighted in both the online players list and the admin panel)
+  // instead of guessing from symptoms like "your car looks different".
+  onVersion(msg) {
+    playerVersions.set(msg.id, msg.version);
+    refreshPlayerList();
+    renderAdminPlayerList();
+  },
+  onMoney(msg) {
+    if (msg.id === net.id) {
+      myMoney = msg.money;
+      if (isAdminAuthed) adminSelfMoneyEl.textContent = myMoney;
+      setNetStatus(`💰 Баланс: ${myMoney}`);
+    } else {
+      playerMoney.set(msg.id, msg.money);
+    }
+    refreshPlayerList();
+    renderAdminPlayerList();
+  },
+  onAdminAuth(msg) {
+    if (msg.ok) {
+      isAdminAuthed = !!msg.isAdmin;
+      if (isAdminAuthed) {
+        adminLoginCardEl.style.display = 'none';
+        adminToolsCardEl.style.display = 'block';
+        adminSelfMoneyEl.textContent = myMoney;
+        renderAdminPlayerList();
+        setNetStatus('Админ-доступ подтверждён');
+      }
+    } else {
+      adminLoginErrorEl.textContent = 'Неверный пароль';
+    }
+  },
+  // Server-authoritative moderation events — some are about ME (kicked,
+  // banned, or my own chat getting dropped for being muted), others are
+  // acks sent back only to the admin who performed an action on someone
+  // else (see server.js's adminKick/adminBan/adminMute handlers).
+  onModeration(msg) {
+    switch (msg.action) {
+      case 'kicked':
+        setNetStatus('Администратор кикнул вас с сервера');
+        break;
+      case 'banned':
+        setNetStatus('Вы забанены на этом сервере');
+        net.disconnect(); // don't let the normal reconnect loop just retry into the same ban
+        break;
+      case 'muteBlocked':
+        setNetStatus('Вы в муте — сообщение не отправлено');
+        break;
+      case 'kickedPlayer':
+        setNetStatus(`Кикнут: ${msg.name || playerDisplayName(msg.targetId)}`);
+        break;
+      case 'bannedPlayer':
+        setNetStatus(`Забанен: ${msg.name || playerDisplayName(msg.targetId)}`);
+        break;
+      case 'mutedPlayer':
+        playerMuted.set(msg.targetId, true);
+        setNetStatus(`Замучен: ${msg.name || playerDisplayName(msg.targetId)}`);
+        refreshPlayerList();
+        renderAdminPlayerList();
+        break;
+      case 'unmutedPlayer':
+        playerMuted.set(msg.targetId, false);
+        setNetStatus(`Размучен: ${msg.name || playerDisplayName(msg.targetId)}`);
+        refreshPlayerList();
+        renderAdminPlayerList();
+        break;
+    }
+  },
+  onMuted(msg) {
+    amIMuted = !!msg.muted;
+    setNetStatus(amIMuted ? 'Администратор вас замутил' : 'С вас снят мут');
     refreshPlayerList();
   },
   onCar(msg) {
@@ -916,6 +1221,15 @@ const net = new Network({
     if (msg.payload && typeof msg.payload.id === 'number') {
       destructibles.applyRemoteRest(msg.payload.id, msg.payload.p, msg.payload.q);
     }
+  },
+  // BUG FIX (round 6 — "chat doesn't work"): Network already parses and
+  // dispatches incoming 'chat' messages via onChat (see network.js), but
+  // nothing here was ever wired up to receive them — so every OTHER
+  // player's message was silently dropped on arrival. Each player only ever
+  // saw their own messages (added locally by sendChatText's immediate
+  // echo), which reads exactly like "chat doesn't work" from either side.
+  onChat(msg) {
+    addChatMessage(msg);
   },
   onConnectionChange(connected) {
     setNetStatus(connected ? 'Соединение установлено' : 'Соединение потеряно — переподключаемся…');
@@ -951,6 +1265,16 @@ function refreshPlayerList() {
   const meLabel = document.createElement('span');
   meLabel.textContent = `${myName || 'Вы'} (вы)`;
   meRow.append(meDot, meLabel);
+  const meMoney = document.createElement('span');
+  meMoney.className = 'money';
+  meMoney.textContent = `💰${myMoney}`;
+  meRow.appendChild(meMoney);
+  if (amIMuted) {
+    const meMuteTag = document.createElement('span');
+    meMuteTag.className = 'tag muted';
+    meMuteTag.textContent = '🔇';
+    meRow.appendChild(meMuteTag);
+  }
   list.appendChild(meRow);
   for (const [id, rc] of remoteCars) {
     const row = document.createElement('div');
@@ -961,6 +1285,29 @@ function refreshPlayerList() {
     const label = document.createElement('span');
     label.textContent = playerNames.get(id) || `Игрок ${id}`;
     row.append(dot, label);
+    // Round 6: version mismatch is the whole point of tracking this at all
+    // — a highlighted tag means "this player is NOT on the same build as
+    // you", answering "how do I tell which version he has" directly in the
+    // players list instead of comparing screenshots.
+    const version = playerVersions.get(id);
+    if (version) {
+      const verTag = document.createElement('span');
+      const mismatch = version !== GAME_VERSION;
+      verTag.className = 'ver' + (mismatch ? ' mismatch' : '');
+      verTag.textContent = mismatch ? `⚠${version}` : version;
+      verTag.title = mismatch ? `Другая версия! У вас: ${GAME_VERSION}` : 'Та же версия, что у вас';
+      row.appendChild(verTag);
+    }
+    const moneyTag = document.createElement('span');
+    moneyTag.className = 'money';
+    moneyTag.textContent = `💰${playerMoney.get(id) ?? 0}`;
+    row.appendChild(moneyTag);
+    if (playerMuted.get(id)) {
+      const muteTag = document.createElement('span');
+      muteTag.className = 'tag muted';
+      muteTag.textContent = '🔇';
+      row.appendChild(muteTag);
+    }
     list.appendChild(row);
   }
 }
@@ -1012,6 +1359,7 @@ document.getElementById('startBtn').addEventListener('click', () => {
   audio.resume(); // user gesture — required before Web Audio can produce sound
   net.setName(myName);
   net.setCar(selectedCarId);
+  net.setVersion(GAME_VERSION);
   net.connect();
   // The car built during boot used whatever model was saved from last time;
   // rebuild it now against whatever the player actually picked just above.
@@ -1031,18 +1379,24 @@ document.getElementById('startBtn').addEventListener('click', () => {
 const camOffset = new THREE.Vector3();
 const camTarget = new THREE.Vector3();
 function updateCamera(dt) {
+  // Round 6: admin spectate/follow — when watching another player, chase
+  // THEIR car's group instead of our own. Driving input still controls our
+  // own car underneath (this only redirects where the camera looks), and
+  // falls back to our own car automatically if the spectated player leaves
+  // (see onLeave/stopSpectating below).
+  const targetGroup = spectateTargetId && remoteCars.has(spectateTargetId) ? remoteCars.get(spectateTargetId).group : car.group;
   const back = cameraMode === 0 ? 8.5 : 4.5;
   const up = cameraMode === 0 ? 3.6 : 2.0;
-  const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(car.group.quaternion);
+  const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(targetGroup.quaternion);
   // Camera sits BEHIND the car (opposite the forward/headlight direction) and
   // looks at a point AHEAD of it. This was inverted before — the camera sat
   // in front of the car looking at a point behind it, so driving forward
   // moved the car toward the camera tail-first, reading as "driving in
   // reverse" even though the physics/input direction was always correct.
-  camOffset.copy(car.group.position).addScaledVector(forward, -back);
+  camOffset.copy(targetGroup.position).addScaledVector(forward, -back);
   camOffset.y += up;
   camera.position.lerp(camOffset, 1 - Math.pow(0.001, dt));
-  camTarget.copy(car.group.position).addScaledVector(forward, 6);
+  camTarget.copy(targetGroup.position).addScaledVector(forward, 6);
   camTarget.y += 1.2;
   camera.lookAt(camTarget);
 }

@@ -208,12 +208,71 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
       // column from ~1 unit wide/0.43 tall to ~1.8 wide/3 tall, close to a
       // real window+floor-height instead of a fine grid of tiny squares.
       tex.repeat.set(Math.max(1, bw / 9), Math.max(1, bh / 30));
-      const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
-      const building = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), mat);
+      // Round-6 ("every building looks the same" + a real bug: windows on
+      // the roof): three cosmetic "styles" reusing the same facade texture
+      // so the palette work above still matters, plus a plain roof cap
+      // material — a BoxGeometry with ONE material stretches the window
+      // texture over all 6 faces, top and bottom included, which is exactly
+      // why flat rooftops were showing a window grid instead of bare roofing
+      // under the AC units. A material ARRAY (one per box face, order
+      // px/nx/py/ny/pz/nz) puts the facade texture on the four vertical
+      // sides only and a flat, unlit-looking cap on top/bottom.
+      const style = choice(['concrete', 'concrete', 'glass', 'brick']);
+      let sideMat;
+      if (style === 'glass') {
+        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.28, metalness: 0.55, color: 0xcfe0ff });
+      } else if (style === 'brick') {
+        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.02, color: 0xffdcc0 });
+      } else {
+        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
+      }
+      const roofCapMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.9, metalness: 0.05 });
+      const building = new THREE.Mesh(
+        new THREE.BoxGeometry(bw, bh, bd),
+        [sideMat, sideMat, roofCapMat, roofCapMat, sideMat, sideMat]
+      );
       building.position.set(cx, bh / 2, cz);
       building.castShadow = true;
       building.receiveShadow = true;
       group.add(building);
+
+      // Round-6 city-diversity pass: ~30% of towers over a minimum height
+      // get a smaller stepped-back second tier instead of a flat top — a
+      // cheap way to break up the skyline into more than just "same box,
+      // different height" without touching the physics footprint (the
+      // setback tier is short/light enough that driving into a building's
+      // base is unaffected, and it sits above where the wheel raycasts and
+      // resolveBuildingOverlap() in main.js ever look).
+      const stepped = bh > 26 && rand(0, 1) < 0.3;
+      if (stepped) {
+        const topW = bw * rand(0.45, 0.68);
+        const topD = bd * rand(0.45, 0.68);
+        const topH = rand(6, 16);
+        const topTex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
+        topTex.repeat.set(Math.max(1, topW / 9), Math.max(1, topH / 30));
+        const topSideMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: sideMat.roughness, metalness: sideMat.metalness, color: sideMat.color.getHex() });
+        const top = new THREE.Mesh(
+          new THREE.BoxGeometry(topW, topH, topD),
+          [topSideMat, topSideMat, roofCapMat, roofCapMat, topSideMat, topSideMat]
+        );
+        top.position.set(cx, bh + topH / 2, cz);
+        top.castShadow = true;
+        top.receiveShadow = true;
+        group.add(top);
+      }
+      const roofY = bh; // clutter always sits on the LOWER roof, even when a stepped-back tier exists above it — reads better than floating clutter up on the setback
+
+      // A thin parapet ledge around the roofline — purely decorative (no
+      // collider, same reasoning as the AC units below: it's well above
+      // where any wheel raycast or building-overlap check ever samples),
+      // but it's what actually reads as "a building" instead of "a box"
+      // from a distance/rooftop view.
+      if (rand(0, 1) < 0.7) {
+        const parapetH = 0.5;
+        const parapet = new THREE.Mesh(new THREE.BoxGeometry(bw + 0.15, parapetH, bd + 0.15), roofCapMat);
+        parapet.position.set(cx, bh + parapetH / 2, cz);
+        group.add(parapet);
+      }
 
       const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(bw / 2, bh / 2, bd / 2)) });
       body.position.set(cx, bh / 2, cz);
@@ -238,7 +297,7 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
         const ac = new THREE.Mesh(new THREE.BoxGeometry(acW, acW * 0.5, acW), roofMat);
         ac.position.set(
           cx + rand(-bw / 2 + acW, bw / 2 - acW),
-          bh + acW * 0.25,
+          roofY + acW * 0.25,
           cz + rand(-bd / 2 + acW, bd / 2 - acW)
         );
         ac.castShadow = true;
@@ -246,7 +305,7 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
       }
       if (rand(0, 1) < 0.35) {
         const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, rand(2, 5), 6), roofMat);
-        antenna.position.set(cx + rand(-bw / 3, bw / 3), bh + antenna.geometry.parameters.height / 2, cz + rand(-bd / 3, bd / 3));
+        antenna.position.set(cx + rand(-bw / 3, bw / 3), roofY + antenna.geometry.parameters.height / 2, cz + rand(-bd / 3, bd / 3));
         group.add(antenna);
       }
     }

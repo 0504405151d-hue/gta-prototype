@@ -438,6 +438,20 @@ export class Vehicle {
         spoke.position.set(0, Math.cos(angle) * radialDist, Math.sin(angle) * radialDist);
         wheelGroup.add(spoke);
       }
+      // Round-6 ("max detail" pass): a red brake-caliper-colored accent
+      // peeking from behind the spokes — same trick as the spokes
+      // themselves (an asymmetric detail so a rotating wheel actually reads
+      // as having something on it, rather than a perfectly smooth disc). A
+      // real caliper doesn't rotate with the wheel; decoupling it from the
+      // per-frame full-wheel-transform copy below would need the chassis
+      // × steering-only quaternion cannon-es tracks internally but doesn't
+      // expose separately, which isn't worth it for a color accent — this
+      // still reads as "a wheel with actual detail on it" from normal
+      // driving/camera distance.
+      const caliperMat = new THREE.MeshStandardMaterial({ color: 0xb2231b, roughness: 0.5, metalness: 0.3 });
+      const caliper = new THREE.Mesh(new THREE.BoxGeometry(0.09, WHEEL_RADIUS * 0.42, WHEEL_RADIUS * 0.2), caliperMat);
+      caliper.position.set(-0.1, WHEEL_RADIUS * 0.32, 0);
+      wheelGroup.add(caliper);
       // IMPORTANT: added to the SCENE, not to `group`. cannon-es's
       // wheelInfo.worldTransform is already a WORLD-space transform; `group`
       // is itself moved/rotated to the chassis's world transform every

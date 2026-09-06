@@ -39,6 +39,11 @@
   #minimap { display: block; }
 
   #help { position: absolute; left: 20px; bottom: 24px; font-size: 12px; line-height: 1.6; background: rgba(10,14,24,.45); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(4px); }
+  /* Round 6: always-on version tag — bottom-right corner, on top of the boot
+     screen too, so two players can compare builds without needing to open
+     any menu (see the "friend's car looks outdated" investigation notes in
+     README's round-6 section for why this exists). */
+  #versionTag { position: fixed; right: 8px; bottom: 4px; font: 11px/1.4 monospace; color: rgba(255,255,255,.35); pointer-events: none; z-index: 9999; user-select: none; }
   #help b { opacity: .9; }
 
   #netStatus { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); font-size: 13px; background: rgba(10,14,24,.5); padding: 6px 14px; border-radius: 20px; }
@@ -113,9 +118,48 @@
   #adminOverlay h1 { font-size: 16px; margin: 0 0 4px; text-align: center; }
   #adminOverlay .sub { font-size: 11px; opacity: .55; text-align: center; margin-bottom: 16px; }
   #adminOverlay .checkboxRow { margin-bottom: 10px; }
+  /* Round 6: password gate + moderation/economy tools — the panel used to be
+     one flat card of local-only toggles; it's now two views (login vs the
+     real tools, swapped by JS) plus a scrollable per-player list, so it
+     needs its own generic button/input/list styling rather than relying on
+     #pauseMenu's .menuBtn rule (which never covered #adminOverlay). */
+  #adminOverlay .card#adminToolsCard { width: 380px; max-height: 82vh; overflow-y: auto; }
+  #adminOverlay input[type="password"], #adminOverlay input[type="number"], #adminOverlay input[type="text"] {
+    width: 100%; box-sizing: border-box; background: #0a0e1a; border: 1px solid #2a3352; color: #eaf0ff;
+    padding: 9px 10px; border-radius: 8px; font-size: 13px; margin-bottom: 8px;
+  }
+  #adminOverlay button { background: #161d33; border: 1px solid #2a3352; color: #eaf0ff; font-weight: 600; padding: 9px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+  #adminOverlay button:hover { background: #1d2542; }
+  #adminOverlay button.primary { background: linear-gradient(135deg,#3b82f6,#22d3ee); color: #04101f; border: none; }
+  #adminOverlay button.danger { background: #3a1420; border-color: #6b2035; }
+  #adminOverlay button.danger:hover { background: #4a1a29; }
+  #adminOverlay .menuBtn { display: block; width: 100%; box-sizing: border-box; margin-bottom: 8px; text-align: left; }
+  #adminOverlay #adminLoginError { text-align: center; color: #ff6b6b; font-size: 12px; min-height: 16px; margin-bottom: 4px; }
+  #adminOverlay .sectionLabel { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; opacity: .55; margin: 14px 0 8px; }
+  #adminOverlay .selfMoneyRow { display: flex; gap: 6px; margin-bottom: 4px; }
+  #adminOverlay .selfMoneyRow input { margin-bottom: 0; }
+  #adminOverlay .selfMoneyRow button { flex: none; }
+  #adminPlayerList { max-height: 240px; overflow-y: auto; margin-bottom: 10px; }
+  #adminPlayerList .adminPlayerRow { border: 1px solid #232b45; border-radius: 8px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
+  #adminPlayerList .nameRow { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; font-weight: 600; gap: 6px; }
+  #adminPlayerList .nameRow .tag { font-weight: 500; opacity: .6; font-size: 10px; }
+  #adminPlayerList .tag.muted { color: #ff8a5b; opacity: 1; }
+  #adminPlayerList .tag.mismatch { color: #ffcc00; opacity: 1; }
+  #adminPlayerList .btnRow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #adminPlayerList .btnRow button { flex: 1 1 auto; padding: 6px 8px; font-size: 11px; }
+  #adminPlayerList .btnRow input[type="number"] { width: 64px; flex: none; margin-bottom: 0; padding: 6px; }
+  #adminPlayerList .empty { opacity: .5; font-size: 12px; text-align: center; padding: 8px 0; }
+  #playerList .ver { opacity: .5; font-size: 10px; margin-left: 4px; }
+  #playerList .ver.mismatch { color: #ffcc00; opacity: 1; }
+  #playerList .money { opacity: .7; font-size: 10px; margin-left: 4px; }
+  #playerList .tag.muted { color: #ff8a5b; font-size: 10px; margin-left: 4px; }
+  #spectateBanner { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(20,10,0,.75); border: 1px solid #ffb347; color: #ffd9a0; padding: 8px 14px; border-radius: 10px; font-size: 12px; display: none; align-items: center; gap: 10px; z-index: 26; backdrop-filter: blur(4px); }
+  #spectateBanner button { background: #ffb347; border: none; color: #241400; font-weight: 700; padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
 </style>
 </head>
 <body>
+
+<div id="versionTag"></div>
 
 <div id="boot">
   <div>Загрузка города…</div>
@@ -164,6 +208,7 @@
   </div>
   <div id="help"><b>WASD</b> движение &nbsp; <b>Space</b> ручник &nbsp; <b>C</b> камера/своб. &nbsp; <b>R</b> respawn &nbsp; <b>P</b> меню &nbsp; <b>Enter</b> чат &nbsp; <b>M</b> телефон &nbsp; <b>H</b> фары &nbsp; <b>~</b> админ-панель</div>
   <div id="netStatus" style="display:none"></div>
+  <div id="spectateBanner"><span id="spectateBannerText"></span> <button id="spectateStopBtn">Стоп</button></div>
 </div>
 
 <div id="pauseMenu">
@@ -259,7 +304,15 @@
 </div>
 
 <div id="adminOverlay">
-  <div class="card">
+  <div class="card" id="adminLoginCard">
+    <h1>Админ-панель ⚙️</h1>
+    <div class="sub">Доступ только по паролю — проверяется на сервере</div>
+    <input type="password" id="adminPasswordInput" placeholder="Пароль администратора" autocomplete="off" />
+    <div id="adminLoginError"></div>
+    <button class="menuBtn primary" id="adminLoginBtn">Войти</button>
+    <button class="menuBtn" id="adminLoginCancelBtn">Отмена</button>
+  </div>
+  <div class="card" id="adminToolsCard" style="display:none">
     <h1>Админ-панель ⚙️</h1>
     <div class="sub">клавиша ~ — открыть/закрыть</div>
     <div class="checkboxRow"><input type="checkbox" id="adminGod" /> <label style="margin:0">Бог-режим (без вмятин и урона)</label></div>
@@ -268,7 +321,19 @@
     <button class="menuBtn" id="adminTrafficBurstBtn">🚗 Добавить 10 машин трафика</button>
     <button class="menuBtn" id="adminClearTrafficBtn">🧹 Убрать весь трафик</button>
     <button class="menuBtn" id="adminResetPropsBtn">📦 Восстановить разрушаемые объекты</button>
+
+    <div class="sectionLabel">💰 Экономика</div>
+    <div class="sub" style="margin-bottom:8px">Ваш баланс: <b id="adminSelfMoney">0</b></div>
+    <div class="selfMoneyRow">
+      <input type="number" id="adminSelfMoneyInput" value="1000" step="100" />
+      <button id="adminSelfMoneyBtn">Себе +</button>
+    </div>
+
+    <div class="sectionLabel">👥 Игроки на сервере</div>
+    <div id="adminPlayerList"><div class="empty">Пока нет других игроков</div></div>
+
     <button class="menuBtn primary" id="adminCloseBtn">Закрыть</button>
+    <button class="menuBtn danger" id="adminLogoutBtn">🚪 Выйти из админ-режима (обычный игрок)</button>
   </div>
 </div>
 

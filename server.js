@@ -27,6 +27,13 @@ const PORT = process.env.PORT || 3000;
 const HEARTBEAT_MS = 25000;
 const MAX_NAME_LEN = 16;
 const MAX_CHAT_LEN = 140;
+const MAX_VERSION_LEN = 40;
+// Round 6: real server-authoritative admin mode. Set ADMIN_PASSWORD in the
+// environment (Render → Environment tab) before sharing this with friends —
+// the fallback below is only so a fresh local checkout still has *something*
+// to log in with.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'citydrive-admin';
+const MAX_MONEY = 1000000000;
 
 const app = express();
 // Everything (index.html, main.js, city.js, ...) sits right next to this file.
@@ -46,6 +53,11 @@ const VALID_CAR_IDS = new Set(['sedan', 'sport', 'suv', 'truck', 'bus']);
 /** @type {Map<string, {ws: import('ws').WebSocket, id: string, color: number, name: string, carId: string, state: any, isAlive: boolean}>} */
 const players = new Map();
 let nextId = 1;
+
+// Round 6: moderation + economy state. IP bans persist only in memory (this
+// is a small friends-and-family server, not a public one) — restarting the
+// process clears them, same as everything else here.
+const bannedIPs = new Set();
 
 // ---------------------------------------------------------------------------
 // Shared world destruction state (authoritative-ish: last write wins).
@@ -68,6 +80,24 @@ function sanitizeName(name) {
 
 function sanitizeCarId(carId) {
   return VALID_CAR_IDS.has(carId) ? carId : 'sedan';
+}
+
+function sanitizeVersion(version) {
+  if (typeof version !== 'string') return '';
+  let out = '';
+  for (const ch of version) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127) continue;
+    out += ch;
+    if (out.length >= MAX_VERSION_LEN) break;
+  }
+  return out.trim();
+}
+
+function clampMoney(n) {
+  n = Math.round(Number(n));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(-MAX_MONEY, Math.min(MAX_MONEY, n));
 }
 
 function sanitizeChat(text) {
@@ -94,10 +124,21 @@ function send(ws, data) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const ip = (req && req.socket && req.socket.remoteAddress) || '';
+  if (bannedIPs.has(ip)) {
+    send(ws, { type: 'moderation', action: 'banned' });
+    ws.close();
+    return;
+  }
+
   const id = String(nextId++);
   const color = CAR_COLORS[(id - 1) % CAR_COLORS.length];
-  const player = { ws, id, color, name: '', carId: 'sedan', state: null, isAlive: true };
+  const player = {
+    ws, id, color, ip, name: '', carId: 'sedan', version: '', state: null, isAlive: true,
+    // Round 6: admin/moderation/economy per-connection state.
+    isAdmin: false, muted: false, money: 0,
+  };
   players.set(id, player);
 
   ws.isAlive = true;
@@ -113,7 +154,7 @@ wss.on('connection', (ws) => {
     color,
     players: Array.from(players.values())
       .filter((p) => p.id !== id && p.state)
-      .map((p) => ({ id: p.id, color: p.color, name: p.name, carId: p.carId, state: p.state })),
+      .map((p) => ({ id: p.id, color: p.color, name: p.name, carId: p.carId, version: p.version, money: p.money, muted: p.muted, state: p.state })),
     shatteredIds: Array.from(shatteredIds),
     propRest: Array.from(propRest.entries()).map(([pid, t]) => ({ id: pid, ...t })),
   });
@@ -140,6 +181,11 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'car', id, carId: player.carId }, id);
         break;
       }
+      case 'setVersion': {
+        player.version = sanitizeVersion(msg.version);
+        broadcast({ type: 'version', id, version: player.version }, id);
+        break;
+      }
       case 'state': {
         if (!msg.state || !Array.isArray(msg.state.p) || !Array.isArray(msg.state.q)) return;
         player.state = msg.state;
@@ -164,6 +210,10 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'chat': {
+        if (player.muted) {
+          send(ws, { type: 'moderation', action: 'muteBlocked' });
+          return;
+        }
         const now = Date.now();
         if (player.lastChatAt && now - player.lastChatAt < 300) return; // simple flood guard
         const text = sanitizeChat(msg.text);
@@ -178,6 +228,61 @@ wss.on('connection', (ws) => {
       case 'ping': {
         // app-level RTT probe, echoed straight back to the sender only
         if (typeof msg.t === 'number') send(ws, { type: 'pong', t: msg.t });
+        break;
+      }
+
+      // --- Round 6: server-authoritative admin / moderation / economy ------
+      // Every action below re-checks player.isAdmin itself rather than
+      // trusting anything the client claims — a modified client can still
+      // *send* an adminKick message, it just won't do anything without
+      // having first passed the password check server-side.
+      case 'adminLogin': {
+        const ok = typeof msg.password === 'string' && msg.password === ADMIN_PASSWORD;
+        if (ok) player.isAdmin = true;
+        send(ws, { type: 'adminAuth', ok, isAdmin: player.isAdmin });
+        break;
+      }
+      case 'adminLogout': {
+        player.isAdmin = false;
+        send(ws, { type: 'adminAuth', ok: true, isAdmin: false });
+        break;
+      }
+      case 'adminKick': {
+        if (!player.isAdmin) return;
+        const target = players.get(String(msg.targetId));
+        if (!target || target.id === id) return;
+        send(target.ws, { type: 'moderation', action: 'kicked' });
+        send(ws, { type: 'moderation', action: 'kickedPlayer', targetId: target.id, name: target.name });
+        target.ws.close();
+        break;
+      }
+      case 'adminBan': {
+        if (!player.isAdmin) return;
+        const target = players.get(String(msg.targetId));
+        if (!target || target.id === id) return;
+        if (target.ip) bannedIPs.add(target.ip);
+        send(target.ws, { type: 'moderation', action: 'banned' });
+        send(ws, { type: 'moderation', action: 'bannedPlayer', targetId: target.id, name: target.name });
+        target.ws.close();
+        break;
+      }
+      case 'adminMute': {
+        if (!player.isAdmin) return;
+        const target = players.get(String(msg.targetId));
+        if (!target) return;
+        target.muted = !!msg.muted;
+        send(target.ws, { type: 'muted', muted: target.muted });
+        send(ws, { type: 'moderation', action: target.muted ? 'mutedPlayer' : 'unmutedPlayer', targetId: target.id, name: target.name });
+        break;
+      }
+      case 'adminGiveMoney': {
+        if (!player.isAdmin) return;
+        const target = players.get(String(msg.targetId));
+        if (!target) return;
+        target.money = clampMoney((target.money || 0) + Number(msg.amount));
+        // No exceptId: everyone's admin panel (and the target's own HUD, if
+        // it shows a balance) should reflect the new total immediately.
+        broadcast({ type: 'money', id: target.id, money: target.money });
         break;
       }
     }
