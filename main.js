@@ -196,6 +196,7 @@ function buildVehicleAt(spawnPoint, carId) {
     maxForce: preset.maxForce,
     maxSteer: preset.maxSteer,
     maxBrakeForce: preset.maxBrakeForce,
+    bodyStyle: preset.bodyStyle,
   });
 }
 const spawn = choice(city.spawnPoints);
@@ -535,6 +536,7 @@ document.getElementById('applyCarBtn').addEventListener('click', () => {
   car = buildVehicleAt(s, newId);
   car.setHeadlightsOn(headlightsOn);
   applyAdminStateToCar();
+  net.setCar(newId);
   setPhone(false);
 });
 
@@ -730,6 +732,22 @@ const MAX_OVERLAP_CORRECTION = 2.5;
 // several contributing factors behind a browser hang the smoke test caught
 // (see the other fixes/notes on this function).
 const _overlapEuler = new THREE.Euler();
+// carBody.quaternion is a cannon-es Quaternion, which stores its components
+// as plain x/y/z/w fields. THREE.Euler.setFromQuaternion() goes through
+// Matrix4.compose(), which reads the quaternion's PRIVATE _x/_y/_z/_w fields
+// (the ones its own x/y/z/w getters proxy to) — fields a cannon-es Quaternion
+// simply doesn't have. Handing it a cannon quaternion directly makes every
+// one of those reads come back `undefined`, so the whole computation silently
+// turns into NaN — every single call, not just during a collision. It stays
+// invisible the rest of the time because nothing downstream of a NaN yaw
+// actually gets used unless a building is close enough to be a real SAT
+// candidate, which in practice means "the car is at/inside a building" —
+// i.e. exactly the moment of a real collision, which is why this surfaced as
+// "the car respawns on any crash". Fix: copy the components into an actual
+// THREE.Quaternion (whose .set() does populate the private fields) before
+// handing it to the Euler — reused every call for the same GC-pressure
+// reasons as _overlapEuler above.
+const _overlapQuat = new THREE.Quaternion();
 
 function _axisOverlap(ax, az, halfW, halfL, fx, fz, rx, rz, halfFW, halfFD, dx, dz) {
   const carR = halfW * Math.abs(fx * ax + fz * az) + halfL * Math.abs(rx * ax + rz * az);
@@ -746,7 +764,9 @@ function resolveBuildingOverlap(carBody, dims, footprints) {
   // only — matches the (sin, cos) convention used everywhere else in this
   // project (city.js/traffic.js) for a body whose quaternion is set via
   // setFromEuler(0, heading, 0).
-  _overlapEuler.setFromQuaternion(carBody.quaternion, 'YXZ');
+  const cq = carBody.quaternion;
+  _overlapQuat.set(cq.x, cq.y, cq.z, cq.w);
+  _overlapEuler.setFromQuaternion(_overlapQuat, 'YXZ');
   const yaw = _overlapEuler.y;
   const fx = Math.sin(yaw), fz = Math.cos(yaw); // car local +Z (nose) in world XZ
   const rx = Math.cos(yaw), rz = -Math.sin(yaw); // car local +X (right) in world XZ
@@ -835,7 +855,7 @@ const net = new Network({
     myColor = msg.color;
     rebuildCarColor();
     for (const p of msg.players) {
-      spawnRemote(p.id, p.color, p.state);
+      spawnRemote(p.id, p.color, p.carId, p.state);
       if (p.name) playerNames.set(p.id, p.name);
     }
     // Catch up on world destruction that happened before we joined.
@@ -845,7 +865,11 @@ const net = new Network({
     setNetStatus(`В сети: вы + ${msg.players.length}`);
   },
   onJoin(msg) {
-    spawnRemote(msg.id, msg.color, null);
+    // carId isn't known yet at bare join — same reason `name` starts blank:
+    // the client sends its setCar/setName right after connecting, which
+    // hasn't arrived here yet. spawnRemote falls back to 'sedan' until the
+    // 'car' message below arrives and (if needed) rebuilds it.
+    spawnRemote(msg.id, msg.color, null, null);
     refreshPlayerList();
   },
   onLeave(msg) {
@@ -864,6 +888,24 @@ const net = new Network({
   onName(msg) {
     playerNames.set(msg.id, msg.name);
     refreshPlayerList();
+  },
+  onCar(msg) {
+    // A connected player switched cars mid-session (the settings panel
+    // rebuilds the LOCAL car immediately — see applyCarBtn's click handler
+    // below — this is the same thing happening for a REMOTE one). The body
+    // shape is baked into the mesh at construction time, so the only way to
+    // reflect a style change is to rebuild the RemoteCar — carrying its
+    // interpolation buffer over so it doesn't visibly snap or vanish for a
+    // frame while the new mesh is unbuffered.
+    const rc = remoteCars.get(msg.id);
+    if (!rc) return;
+    const preset = CAR_PRESETS[msg.carId] || CAR_PRESETS.sedan;
+    if (rc.bodyStyle === preset.bodyStyle) return; // e.g. sedan -> sport: same generic body, nothing to rebuild
+    const { buffer, color } = rc;
+    rc.dispose(scene);
+    const newRc = new RemoteCar(THREE, scene, color, preset.bodyStyle);
+    newRc.buffer = buffer;
+    remoteCars.set(msg.id, newRc);
   },
   onHit(msg) {
     if (!msg.payload || typeof msg.payload.id !== 'number') return;
@@ -884,9 +926,10 @@ const net = new Network({
   },
 });
 
-function spawnRemote(id, color, state) {
+function spawnRemote(id, color, carId, state) {
   if (remoteCars.has(id)) return;
-  const rc = new RemoteCar(THREE, scene, color);
+  const preset = CAR_PRESETS[carId] || CAR_PRESETS.sedan;
+  const rc = new RemoteCar(THREE, scene, color, preset.bodyStyle);
   if (state) rc.setTarget(state);
   remoteCars.set(id, rc);
 }
@@ -968,6 +1011,7 @@ document.getElementById('startBtn').addEventListener('click', () => {
   renderer.domElement.style.display = 'block';
   audio.resume(); // user gesture — required before Web Audio can produce sound
   net.setName(myName);
+  net.setCar(selectedCarId);
   net.connect();
   // The car built during boot used whatever model was saved from last time;
   // rebuild it now against whatever the player actually picked just above.

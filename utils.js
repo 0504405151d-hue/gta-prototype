@@ -50,7 +50,13 @@ export function clamp(v, lo, hi) {
 
 // Procedural building facade texture (windows grid), drawn on a canvas.
 // Avoids needing external image assets while still looking detailed.
-export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', lit = '#ffd98a', dim = '#12141c', cols = 6, rows = 14 } = {}) {
+// Round-5 ("windows are too small"): cols/rows dropped from 6/14 to 5/10 —
+// fewer, bigger cells per tile — and city.js was ALSO tiling this texture
+// far too densely across a building face (repeating the whole 6x14 grid
+// once every 6 units of wall), which compounded into windows barely large
+// enough to read as windows at all rather than a fine noise pattern. See the
+// repeat.set() call there for the other half of this fix.
+export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', lit = '#ffd98a', dim = '#12141c', cols = 5, rows = 10 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;

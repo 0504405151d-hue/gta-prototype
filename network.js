@@ -8,7 +8,7 @@ const RECONNECT_MAX_MS = 6000;
 const PING_INTERVAL_MS = 3000;
 
 export class Network {
-  constructor({ onWelcome, onJoin, onLeave, onState, onHit, onRest, onName, onConnectionChange, onPing, onChat }) {
+  constructor({ onWelcome, onJoin, onLeave, onState, onHit, onRest, onName, onCar, onConnectionChange, onPing, onChat }) {
     this.onWelcome = onWelcome;
     this.onJoin = onJoin;
     this.onLeave = onLeave;
@@ -16,6 +16,7 @@ export class Network {
     this.onHit = onHit;
     this.onRest = onRest;
     this.onName = onName;
+    this.onCar = onCar;
     this.onConnectionChange = onConnectionChange;
     this.onPing = onPing;
     this.onChat = onChat;
@@ -24,6 +25,11 @@ export class Network {
     this.id = null;
     this.connected = false;
     this._pendingName = '';
+    // Round-5 (remote players should show the vehicle type their driver
+    // actually picked, not always a generic body): mirrors _pendingName's
+    // "resend on (re)connect" behavior exactly, since a dropped/reconnected
+    // socket forgets everything the server knew about this player.
+    this._pendingCarId = '';
     this._reconnectDelay = RECONNECT_MIN_MS;
     this._reconnectTimer = null;
     this._pingTimer = null;
@@ -48,6 +54,11 @@ export class Network {
     if (this.connected) this._send({ type: 'setName', name: this._pendingName });
   }
 
+  setCar(carId) {
+    this._pendingCarId = carId || '';
+    if (this.connected) this._send({ type: 'setCar', carId: this._pendingCarId });
+  }
+
   _open() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}`);
@@ -57,6 +68,7 @@ export class Network {
       this.connected = true;
       this._reconnectDelay = RECONNECT_MIN_MS;
       if (this._pendingName) this._send({ type: 'setName', name: this._pendingName });
+      if (this._pendingCarId) this._send({ type: 'setCar', carId: this._pendingCarId });
       this._pingTimer = setInterval(() => this._send({ type: 'ping', t: performance.now() }), PING_INTERVAL_MS);
       this.onConnectionChange && this.onConnectionChange(true);
     });
@@ -101,6 +113,9 @@ export class Network {
           break;
         case 'name':
           this.onName && this.onName(msg);
+          break;
+        case 'car':
+          this.onCar && this.onCar(msg);
           break;
         case 'pong':
           if (typeof msg.t === 'number') {

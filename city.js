@@ -193,9 +193,21 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
       const bw = footprint - rand(4, 8);
       const bd = footprint - rand(4, 8);
       const bh = rand(10, 62);
-      const hue = rand(0, 1) < 0.5 ? 0x2b2f3a : 0x3a3226;
+      // Round-5 graphics pass: was a coin-flip between exactly 2 facade
+      // colors for the whole city — every block ended up looking like a
+      // repeat of the same two towers. A wider, still-muted palette (kept
+      // low-saturation on purpose, same reasoning as the original two: a
+      // neon-bright skyline would fight the glare fixes from round 3) gives
+      // real block-to-block variety instead.
+      const hue = choice([0x2b2f3a, 0x3a3226, 0x2f3a34, 0x33303f, 0x3a2f2f, 0x2a3540, 0x3a3730]);
       const tex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
-      tex.repeat.set(Math.max(1, Math.round(bw / 6)), Math.max(1, Math.round(bh / 6)));
+      // Round-5 ("windows are too small"): each texture tile now has 5
+      // columns / 10 rows (down from 6/14 — see buildFacadeTexture) AND is
+      // stretched over a much bigger patch of wall before repeating (9
+      // units wide, 30 tall, instead of 6x6) — together that takes a window
+      // column from ~1 unit wide/0.43 tall to ~1.8 wide/3 tall, close to a
+      // real window+floor-height instead of a fine grid of tiny squares.
+      tex.repeat.set(Math.max(1, bw / 9), Math.max(1, bh / 30));
       const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
       const building = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), mat);
       building.position.set(cx, bh / 2, cz);

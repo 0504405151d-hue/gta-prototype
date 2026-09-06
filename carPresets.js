@@ -9,11 +9,16 @@
 // into the same already-correct formulas (e.g. the parallel-axis inertia
 // correction uses the body's actual mass at runtime, whatever that is).
 
+// Round-5: added 'truck' and 'bus' — unlike sport/suv (which just resize the
+// same sedan-shaped body in vehicle.js), these two set bodyStyle to route to
+// genuinely different mesh-building code (_buildTruckBody/_buildBusBody in
+// vehicle.js) so they actually look like a truck/bus, not a stretched sedan.
 export const CAR_PRESETS = {
   sedan: {
     id: 'sedan',
     name: 'Седан',
     desc: 'Сбалансированный — ничего не подчёркнуто, ничего не в минусе',
+    bodyStyle: 'sedan',
     dims: { chassisW: 1.9, chassisH: 0.65, chassisL: 4.2 },
     mass: 165,
     maxForce: 1000,
@@ -24,6 +29,7 @@ export const CAR_PRESETS = {
     id: 'sport',
     name: 'Спорткар',
     desc: 'Ниже и легче, разгон и руль острее, тормозит сильнее',
+    bodyStyle: 'sedan',
     dims: { chassisW: 1.85, chassisH: 0.52, chassisL: 4.05 },
     mass: 138,
     maxForce: 1320,
@@ -34,11 +40,34 @@ export const CAR_PRESETS = {
     id: 'suv',
     name: 'Внедорожник',
     desc: 'Выше и тяжелее — медленнее разгон, зато крепче держит удар',
+    bodyStyle: 'sedan',
     dims: { chassisW: 2.02, chassisH: 0.86, chassisL: 4.55 },
     mass: 215,
     maxForce: 960,
     maxSteer: 0.29,
     maxBrakeForce: 58,
+  },
+  truck: {
+    id: 'truck',
+    name: 'Грузовик',
+    desc: 'Кабина + открытый кузов — тяжёлый и медленный, зато прочный',
+    bodyStyle: 'truck',
+    dims: { chassisW: 2.15, chassisH: 1.05, chassisL: 5.6 },
+    mass: 340,
+    maxForce: 1150,
+    maxSteer: 0.26,
+    maxBrakeForce: 66,
+  },
+  bus: {
+    id: 'bus',
+    name: 'Автобус',
+    desc: 'Самый длинный и высокий — разгон вялый, руль широкий',
+    bodyStyle: 'bus',
+    dims: { chassisW: 2.3, chassisH: 1.3, chassisL: 8.5 },
+    mass: 480,
+    maxForce: 1300,
+    maxSteer: 0.2,
+    maxBrakeForce: 70,
   },
 };
 

@@ -36,8 +36,14 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const CAR_COLORS = [0xff3b30, 0x34c759, 0x0a84ff, 0xffcc00, 0xaf52de, 0xff9500, 0x5ac8fa, 0xff2d55];
+// Kept in sync with the ids in carPresets.js by hand — this file is plain
+// CommonJS and doesn't share that ES module, and it's a fixed, rarely-changed
+// set, so a small duplicated whitelist here is simpler than wiring up a
+// cross-format import just for this. Anything else sent by a client falls
+// back to 'sedan' (see sanitizeCarId below) rather than being trusted as-is.
+const VALID_CAR_IDS = new Set(['sedan', 'sport', 'suv', 'truck', 'bus']);
 
-/** @type {Map<string, {ws: import('ws').WebSocket, id: string, color: number, name: string, state: any, isAlive: boolean}>} */
+/** @type {Map<string, {ws: import('ws').WebSocket, id: string, color: number, name: string, carId: string, state: any, isAlive: boolean}>} */
 const players = new Map();
 let nextId = 1;
 
@@ -58,6 +64,10 @@ function sanitizeName(name) {
     if (out.length >= MAX_NAME_LEN) break;
   }
   return out.trim();
+}
+
+function sanitizeCarId(carId) {
+  return VALID_CAR_IDS.has(carId) ? carId : 'sedan';
 }
 
 function sanitizeChat(text) {
@@ -87,7 +97,7 @@ function send(ws, data) {
 wss.on('connection', (ws) => {
   const id = String(nextId++);
   const color = CAR_COLORS[(id - 1) % CAR_COLORS.length];
-  const player = { ws, id, color, name: '', state: null, isAlive: true };
+  const player = { ws, id, color, name: '', carId: 'sedan', state: null, isAlive: true };
   players.set(id, player);
 
   ws.isAlive = true;
@@ -103,7 +113,7 @@ wss.on('connection', (ws) => {
     color,
     players: Array.from(players.values())
       .filter((p) => p.id !== id && p.state)
-      .map((p) => ({ id: p.id, color: p.color, name: p.name, state: p.state })),
+      .map((p) => ({ id: p.id, color: p.color, name: p.name, carId: p.carId, state: p.state })),
     shatteredIds: Array.from(shatteredIds),
     propRest: Array.from(propRest.entries()).map(([pid, t]) => ({ id: pid, ...t })),
   });
@@ -123,6 +133,11 @@ wss.on('connection', (ws) => {
       case 'setName': {
         player.name = sanitizeName(msg.name);
         broadcast({ type: 'name', id, name: player.name }, id);
+        break;
+      }
+      case 'setCar': {
+        player.carId = sanitizeCarId(msg.carId);
+        broadcast({ type: 'car', id, carId: player.carId }, id);
         break;
       }
       case 'state': {
