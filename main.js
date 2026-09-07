@@ -11,8 +11,10 @@ import { Vehicle, RemoteCar } from './vehicle.js';
 import { DestructibleField } from './destructibles.js';
 import { EffectsSystem } from './effects.js';
 import { AudioSystem } from './audio.js';
+import { RadioSystem } from './radio.js';
 import { Network } from './network.js';
 import { TrafficSystem } from './traffic.js';
+import { TrafficLightSystem } from './trafficLights.js';
 import { choice, setAnisotropy } from './utils.js';
 import { loadSettings, saveSettings, TRAFFIC_COUNTS } from './settings.js';
 import { WeatherSystem } from './weather.js';
@@ -24,7 +26,7 @@ import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 // people can actually SEE whether they're both on the same deployed build
 // instead of guessing from symptoms like "your car looks different to me".
 // Bump this string whenever a round of changes ships.
-export const GAME_VERSION = 'r6 · 2026-09-06';
+export const GAME_VERSION = 'r7 · 2026-09-06';
 const versionTagEl = document.getElementById('versionTag');
 if (versionTagEl) versionTagEl.textContent = `City Drive ${GAME_VERSION}`;
 
@@ -148,10 +150,20 @@ world.allowSleep = true;
 const effects = new EffectsSystem(THREE, scene);
 const audio = new AudioSystem();
 audio.setVolume(settings.volume);
+// Round 7 ("добавь типо радио ... переключать или выключить" — Q key
+// cycles an in-car radio through a few stations, or off). Shares audio's
+// AudioContext/master gain rather than owning its own — see radio.js.
+const radio = new RadioSystem(audio);
 
 function handleEffect(kind, pos, strength) {
   const p = new THREE.Vector3(pos.x, pos.y, pos.z);
-  if (kind === 'shatter') {
+  if (kind === 'explosion') {
+    // Round 7 ("сделай в 10 раз летальнее машини"): a totalled car (see
+    // vehicle.js's _explode()) gets the loudest, biggest effect in the
+    // game — a real destruction moment, not just another impact clank.
+    effects.spawnExplosion(p);
+    audio.playImpact(1);
+  } else if (kind === 'shatter') {
     effects.spawnSmoke(p, 8);
     effects.spawnSparks(p, 6);
     audio.playImpact(Math.min(1, strength + 0.35));
@@ -185,6 +197,12 @@ const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords
   laneOffset: ROAD_HALF_WIDTH / 2,
   count: TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium,
 });
+// Round 7 ("add traffic lights so NPCs don't crash into each other"): one
+// shared signal phase for the whole (grid) city — see trafficLights.js for
+// why a single global phase is enough here. traffic.update() below queries
+// it every frame to decide whether an AI car approaching a crossing should
+// brake.
+const trafficLights = new TrafficLightSystem(THREE, city.group, city.streetCoords);
 
 setBootProgress(70, 'Настраиваем погоду…');
 const weather = new WeatherSystem(THREE, scene, city, city.groundMat, audio);
@@ -266,6 +284,13 @@ addEventListener('keydown', (e) => {
     headlightsOn = !headlightsOn;
     car.setHeadlightsOn(headlightsOn);
     setNetStatus(headlightsOn ? '💡 Фары включены' : 'Фары выключены');
+  }
+  // Round 7: Q cycles the in-car radio (off → 3 stations → off). Skipped
+  // while free-flying (cameraMode === 2) since Q/E already control that
+  // camera's altitude there (see readInput() below) — overloading the same
+  // key would change the radio station every time the player flies down.
+  if (e.code === 'KeyQ' && cameraMode !== 2 && !e.repeat) {
+    setNetStatus('Радио: ' + radio.cycle());
   }
   if (e.code === 'Backquote') setAdmin(!adminOpen);
   if (e.code === 'Enter' && !paused && !phoneOpen) openChat();
@@ -1598,9 +1623,21 @@ function loop(now) {
     }
   }
 
+  // Round 7 ("сделай в 10 раз летальнее машини" — a hard enough crash now
+  // actually totals the car, see vehicle.js's _explode()/DESTROY_DAMAGE):
+  // same polling pattern as the out-of-bounds check just above, just keyed
+  // off car.destroyed instead. A short beat (not an instant swap) so the
+  // explosion effect/sound actually gets seen before the wreck is pulled
+  // off the road.
+  if (car.destroyed && performance.now() / 1000 - car.destroyedAt > 2.2) {
+    respawnCar();
+    setNetStatus('Машина уничтожена — респавн');
+  }
+
   destructibles.update(dt);
   effects.update(dt);
-  traffic.update(dt, getTrafficObstacles());
+  trafficLights.update(dt);
+  traffic.update(dt, getTrafficObstacles(), trafficLights);
   weather.update(dt, car.group.position);
   if (roofUfo) roofUfo.update(dt);
   if (activeFlyoverUfo) {

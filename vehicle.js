@@ -11,9 +11,25 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export const WHEEL_RADIUS = 0.36;
 
-const DENT_RADIUS = 0.85;
-const DENT_MAX_PUSH = 0.22;
-const DENT_SPEED_THRESHOLD = 3.2;
+// Round 7 ("сделай в 10 раз летальнее машини" — make crashes ~10x more
+// lethal): dents now trigger at lower speed, dig in deeper over a wider
+// area, and (see _onChassisCollide/DESTROY_DAMAGE below) a genuinely hard
+// hit can total a car outright instead of just cosmetically scuffing it no
+// matter how many times it got hit.
+const DENT_RADIUS = 1.15;
+const DENT_MAX_PUSH = 0.42;
+const DENT_SPEED_THRESHOLD = 2.0;
+// A single impact at/above this speed (m/s) maxes out that end's damage in
+// ONE hit — was capped at 0.4 per hit off a /35 divisor before round 7, so
+// even a wall-at-full-speed crash took 3+ hits to visibly wreck an end and
+// NOTHING ever fully destroyed the car. ~16 m/s is a real, achievable "hit
+// a wall at speed" crash, not a contrived edge case.
+const DAMAGE_PER_HIT_SPEED_DIVISOR = 16;
+// Once either end reaches this much damage the car is totalled — see
+// _explode(). 1.0 (not slightly under) so a single max-damage hit destroys
+// the car in one shot, matching "10x lethal" rather than needing a second
+// follow-up hit on an already-wrecked end.
+const DESTROY_DAMAGE = 1.0;
 const CHASSIS_Y_OFFSET = 0.4; // how far the collision box sits above the body origin (wheel-mount height)
 const ANTI_ROLL_STIFFNESS = 9000; // empirically tuned in a headless test — see fix notes below
 // Anti-wheelie safety net (see _applyPitchSafety below). Threshold is ~7°:
@@ -190,8 +206,19 @@ export class Vehicle {
       color, roughness: 0.42, metalness: 0.6, clearcoat: 0.7, clearcoatRoughness: 0.5, envMapIntensity: 0.55,
     });
     this.bodyMat = bodyMat;
+    this._paintColor = color; // restored on respawn — see _explode()/respawn()
+    // Round-7 ("my own windshield is a flat black rectangle"): this was an
+    // OPAQUE near-black material with no transparency at all — under normal
+    // lighting (no strong reflection angle on the sun, and the scene has no
+    // real environment map to bounce off) it just reads as a solid black
+    // panel, not glass. Same fix already applied to traffic.js's NPC cabins
+    // this round: transparent + a lighter, cooler tint so light actually
+    // passes through it and it catches highlights instead of going flat
+    // black. This one material is shared by the player's own car AND every
+    // RemoteCar variant (see the identical definitions further down this
+    // file) so the fix applies everywhere glass is used, not just here.
     const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6,
+      color: 0x0d1a2a, roughness: 0.12, metalness: 0.08, transparent: true, opacity: 0.6, clearcoat: 0.55, clearcoatRoughness: 0.2, envMapIntensity: 0.9,
     });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.5, metalness: 0.75 }); // matte black plastic trim/bumpers
     const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.3, metalness: 0.9 }); // mirrors/exhaust/rim accents (roughened — was near-mirror chrome)
@@ -473,6 +500,12 @@ export class Vehicle {
     // (the car still bounces off things), this only skips the cosmetic
     // dent/damage reaction in _onChassisCollide below.
     this.godMode = false;
+    // Round-7 ("make crashes actually lethal"): true once a hit has totalled
+    // the car — see _explode(). While true, update() ignores all drive
+    // input (the wreck just sits there, still fully physical) until
+    // respawn() clears it. main.js polls this every frame to know when to
+    // pull the player out of the wreck and back onto the road.
+    this.destroyed = false;
 
     // ---------- Damage state (round-3: "improve car destruction") ----------
     // The per-vertex dent in _applyDent() below only ever sculpted the flat
@@ -743,7 +776,16 @@ export class Vehicle {
 
   update(dt) {
     const v = this.vehicle;
-    const { throttle, steer, brake, handbrake } = this.input;
+    // Round 7: a totalled car (see _explode()) ignores whatever the player
+    // is still holding down — ordinary setInput() calls from main.js's
+    // per-frame readInput() would otherwise stomp the all-stop input
+    // _explode() set the instant a key was still held, undoing the lockout
+    // one frame later. Full brake + handbrake here instead of zero brake so
+    // the wreck actually settles to a stop rather than coasting on its
+    // last momentum forever.
+    const { throttle, steer, brake, handbrake } = this.destroyed
+      ? { throttle: 0, steer: 0, brake: 1, handbrake: true }
+      : this.input;
 
     // Sign verified by directly simulating cannon-es's RaycastVehicle rather
     // than guessing: with indexForwardAxis=2/indexUpAxis=1/indexRightAxis=0
@@ -1000,6 +1042,11 @@ export class Vehicle {
     this.frontDamage = 0;
     this.rearDamage = 0;
     this._applyCrumple();
+    // Round 7: undo _explode()'s charred/blackened paint and re-enable
+    // driving — a fresh spawn shouldn't still look/act like a wreck.
+    this.destroyed = false;
+    this.bodyMat.color.setHex(this._paintColor);
+    if (this.bodyMat.emissive) this.bodyMat.emissive.setHex(0x000000);
   }
 
   // -------------------------------------------------------------------
@@ -1012,6 +1059,7 @@ export class Vehicle {
     // feel just as real a thing to hit as a wall does.
     if (!other.userData || !(other.userData.isBuilding || other.userData.isTraffic)) return;
     if (this.godMode) return; // admin "god mode" — physics collision still happens, just no cosmetic dent/damage
+    if (this.destroyed) return; // already a wreck — no more damage/effects to pile on until respawn
     const contact = e.contact;
     const impactSpeed = contact.getImpactVelocityAlongNormal ? Math.abs(contact.getImpactVelocityAlongNormal()) : 0;
     if (impactSpeed < DENT_SPEED_THRESHOLD) return;
@@ -1026,9 +1074,12 @@ export class Vehicle {
     // Directional crumple damage: which end got hit decides whether the
     // hood/front bumper or the trunk/rear bumper visibly cave in — see
     // _applyCrumple() and the frontDamage/rearDamage fields above.
+    // Round 7: steeper per-hit damage (see DAMAGE_PER_HIT_SPEED_DIVISOR) —
+    // a real wall-at-speed crash can now max out one end in a single hit
+    // instead of needing several before it looked properly wrecked.
     const localPoint = new this.CANNON.Vec3();
     this.chassisBody.pointToLocalFrame(worldPoint, localPoint);
-    const dmgInc = Math.min(0.4, impactSpeed / 35);
+    const dmgInc = Math.min(1, impactSpeed / DAMAGE_PER_HIT_SPEED_DIVISOR);
     if (localPoint.z >= 0) this.frontDamage = Math.min(1, this.frontDamage + dmgInc);
     else this.rearDamage = Math.min(1, this.rearDamage + dmgInc);
     this._applyCrumple();
@@ -1050,6 +1101,32 @@ export class Vehicle {
       this._lastImpactEffectAt = now;
       this.onEffect('impact', { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z }, Math.min(1, impactSpeed / 10));
     }
+
+    // Round 7 ("сделай в 10 раз летальнее машини" — real destruction, not
+    // just cosmetic damage): once either end is fully crumpled, the car is
+    // totalled outright instead of just accumulating more dents forever.
+    if (Math.max(this.frontDamage, this.rearDamage) >= DESTROY_DAMAGE) {
+      this._explode(worldPoint);
+    }
+  }
+
+  /**
+   * Totals the car: a big explosion effect at the impact point, the wreck
+   * blackens/chars, and every drive input is cut dead (see update()) so the
+   * player can't keep "driving" a smoking wreck around — main.js polls
+   * `car.destroyed` every frame (the same pattern it already uses for the
+   * out-of-bounds safety net) and respawns the player onto the road after a
+   * short beat, the way a real "you wrecked, restart" moment reads rather
+   * than an instant, jarring teleport.
+   */
+  _explode(worldPoint) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.destroyedAt = performance.now() / 1000;
+    this.input = { throttle: 0, steer: 0, brake: 1, handbrake: true };
+    this.bodyMat.color.setHex(0x0e0d0c);
+    if (this.bodyMat.emissive) this.bodyMat.emissive.setHex(0x3a0e00);
+    this.onEffect('explosion', { x: worldPoint.x, y: worldPoint.y, z: worldPoint.z }, 1);
   }
 
   _applyDent(worldPoint, speed) {
@@ -1149,10 +1226,20 @@ export class RemoteCar {
     group.add(base);
     const cabin = new THREE.Mesh(
       new THREE.BoxGeometry(1.56, 0.5, 2.1),
-      new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6 })
+      new THREE.MeshPhysicalMaterial({ color: 0x0d1a2a, roughness: 0.12, metalness: 0.08, transparent: true, opacity: 0.6, clearcoat: 0.55, clearcoatRoughness: 0.2, envMapIntensity: 0.9 })
     );
     cabin.position.set(0, 0.65, -0.15);
     group.add(cabin);
+    // Round-7: the cabin box above used to be an OPAQUE dark material, which
+    // doubled as both "the greenhouse glass" AND "the roof" at once — making
+    // it transparent (previous fix, same round) to actually look like glass
+    // means there's no roof left at all, just an open glass box. A thin
+    // solid cap right at the top closes it back into a real car — same
+    // paint color as the body, like a real roof panel.
+    const roofCap = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.06, 2.0), bodyMat);
+    roofCap.position.set(0, 0.65 + 0.25 - 0.03, -0.15);
+    roofCap.castShadow = true;
+    group.add(roofCap);
 
     // Round-4 polish pass: other connected players' cars used to be just
     // this bare box + cabin + wheels — no lights, no trim at all, noticeably
@@ -1259,7 +1346,7 @@ export class RemoteCar {
     const chassisW = 2.15, chassisH = 1.05, chassisL = 5.6;
     const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.42, metalness: 0.6, clearcoat: 0.7, clearcoatRoughness: 0.5, envMapIntensity: 0.55 });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.5, metalness: 0.75 });
-    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6 });
+    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0d1a2a, roughness: 0.12, metalness: 0.08, transparent: true, opacity: 0.6, clearcoat: 0.55, clearcoatRoughness: 0.2, envMapIntensity: 0.9 });
 
     const cabLen = chassisL * 0.28;
     const cabZ = chassisL / 2 - cabLen / 2 - 0.1;
@@ -1304,7 +1391,7 @@ export class RemoteCar {
     const chassisW = 2.3, chassisH = 1.3, chassisL = 8.5;
     const bodyMat = new THREE.MeshPhysicalMaterial({ color, roughness: 0.42, metalness: 0.6, clearcoat: 0.7, clearcoatRoughness: 0.5, envMapIntensity: 0.55 });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 0.5, metalness: 0.75 });
-    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0a1018, roughness: 0.18, metalness: 0.15, clearcoat: 0.35, clearcoatRoughness: 0.4, envMapIntensity: 0.6 });
+    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0d1a2a, roughness: 0.12, metalness: 0.08, transparent: true, opacity: 0.6, clearcoat: 0.55, clearcoatRoughness: 0.2, envMapIntensity: 0.9 });
 
     const bodyTopY = 0.35 + (chassisH * 0.5) / 2;
     const cabinH = chassisH * 1.5;

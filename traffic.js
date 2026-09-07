@@ -65,6 +65,18 @@ function buildTrafficCarMesh(THREE, color, styleKey) {
   cabin.position.set(0, H * 0.68, L * style.cabinZFrac);
   cabin.castShadow = true;
   group.add(cabin);
+  // Round-7 ("NPC cars have no roof, just a glass cabin"): making the
+  // cabin transparent (right above) means there's nothing solid left up
+  // top — a real car's roof is an opaque panel, the glass is only the
+  // sides/front/back. A thin cap, same paint as the body, flush with the
+  // cabin's top face closes it back into a real-looking roof.
+  const roofCap = new THREE.Mesh(
+    new THREE.BoxGeometry(W * style.cabinWFrac * 0.97, 0.06, L * style.cabinLFrac * 0.97),
+    bodyMat
+  );
+  roofCap.position.set(0, H * 0.68 + (H * style.cabinHFrac) / 2 - 0.03, L * style.cabinZFrac);
+  roofCap.castShadow = true;
+  group.add(roofCap);
 
   // Trim: bumper strips + wing mirrors + two-tone wheels — the same cheap
   // panel-breaking detail the player's own car got (round-3: "improve the
@@ -358,8 +370,17 @@ export class TrafficSystem {
    *   is an omnidirectional "someone is right on top of us" check that
    *   ignores lane/heading entirely, for when a player rams in sideways or
    *   stops across the lane rather than staying neatly in front.
+   * @param trafficLights optional TrafficLightSystem (see trafficLights.js) —
+   *   Round 7 ("add traffic lights so NPCs don't crash into each other").
+   *   When present, a car approaching (but not yet turning/committed into)
+   *   an intersection also brakes if its direction of travel's axis isn't
+   *   the one currently lit green — cars driving along z ("ns") and cars
+   *   driving along x ("ew") never both get a green at once (see
+   *   trafficLights.js's PHASES), so this alone is enough to stop AI cars
+   *   from T-boning each other at a crossing without any per-intersection
+   *   state here.
    */
-  update(dt, obstacles = []) {
+  update(dt, obstacles = [], trafficLights = null) {
     const segLen = this.streetCoords[1] !== undefined ? Math.abs(this.streetCoords[1] - this.streetCoords[0]) : 34;
 
     for (const car of this.cars) {
@@ -393,6 +414,17 @@ export class TrafficSystem {
           if (Math.hypot(dx, dz) < (obs.panicRadius ?? 3.4)) { blocked = true; break; }
           if (this._isAheadAndClose(car, obs, obs.lateral ?? 3, obs.lookahead ?? 10)) { blocked = true; break; }
         }
+      }
+      // Round 7: red-light braking. Only while cruising a straight segment
+      // toward the next node (not already mid-turn — a car committed into
+      // the intersection finishes crossing rather than freezing halfway
+      // through it) and only in a "stop line" window shortly before arrival:
+      // too early and cars visibly brake far from the corner for no reason,
+      // too late (t very close to 1) and a car that just missed the yellow
+      // ends up stopped blocking the box instead of clearing it.
+      if (!blocked && trafficLights && !car.turn && car.t > 0.55 && car.t < 0.93) {
+        const axis = car.dx !== 0 ? 'ew' : 'ns';
+        if (!trafficLights.isGreenForAxis(axis)) blocked = true;
       }
 
       const cruiseTarget = car.turn ? car.turnSpeed : car.targetSpeed;

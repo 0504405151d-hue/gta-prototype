@@ -3,7 +3,7 @@
 // pure eye-candy driven by events other modules already produce (collisions,
 // wheel skid state), pooled and capped so it stays cheap at prototype scale.
 
-import { rand, buildSoftDotTexture } from './utils.js';
+import { rand, choice, buildSoftDotTexture } from './utils.js';
 
 const MAX_PARTICLES = 220;
 const MAX_SKID_QUADS = 500;
@@ -88,6 +88,40 @@ export class EffectsSystem {
         life: rand(0.8, 1.4),
         gravity: -0.6,
         opacity: 0.5,
+      });
+    }
+  }
+
+  /**
+   * Round 7 ("сделай в 10 раз летальнее машини" — real car destruction, not
+   * just a dent): the one-shot burst when a car gets totalled (see
+   * vehicle.js's _explode()). Deliberately bigger/louder-reading than every
+   * other effect here — a fast bright flash, a wide shower of fire-colored
+   * embers (reusing the same sprite/particle pool as spawnSparks, just hot
+   * orange/red instead of stone-chip yellow and thrown further), and a
+   * heavy black smoke column that lingers well past the other effects so
+   * the wreck keeps visibly smoking for a beat after the flash is gone.
+   */
+  spawnExplosion(position) {
+    const { THREE } = this;
+    // Flash: one big, fast-fading bright sprite — the "boom" read happens
+    // in the first couple of frames, everything else below is the follow-through.
+    this._spawnParticle({
+      position, velocity: new THREE.Vector3(0, 0.5, 0), size: 3.2, color: 0xfff2c0,
+      life: 0.18, gravity: 0, opacity: 1,
+    });
+    for (let i = 0; i < 22; i++) {
+      const vel = new THREE.Vector3(rand(-7, 7), rand(3, 9), rand(-7, 7));
+      this._spawnParticle({
+        position, velocity: vel, size: rand(0.14, 0.32), color: choice([0xff6a1a, 0xffb347, 0xff2e0e]),
+        life: rand(0.4, 0.85), gravity: -10, opacity: 1,
+      });
+    }
+    for (let i = 0; i < 14; i++) {
+      const vel = new THREE.Vector3(rand(-2.5, 2.5), rand(2.5, 5.5), rand(-2.5, 2.5));
+      this._spawnParticle({
+        position, velocity: vel, size: rand(1.1, 2.1), color: 0x2a2620,
+        life: rand(1.6, 2.6), gravity: -0.4, opacity: 0.65,
       });
     }
   }

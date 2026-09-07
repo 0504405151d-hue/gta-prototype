@@ -184,130 +184,168 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
         for (let t = 0; t < treeCount; t++) {
           const tx = cx + rand(-footprint / 2 + 2, footprint / 2 - 2);
           const tz = cz + rand(-footprint / 2 + 2, footprint / 2 - 2);
-          addTree(THREE, group, tx, tz);
+          addTree(THREE, CANNON, world, group, tx, tz);
         }
         continue;
       }
 
-      // Building footprint smaller than the sidewalk to leave a walkable margin
-      const bw = footprint - rand(4, 8);
-      const bd = footprint - rand(4, 8);
-      const bh = rand(10, 62);
-      // Round-5 graphics pass: was a coin-flip between exactly 2 facade
-      // colors for the whole city — every block ended up looking like a
-      // repeat of the same two towers. A wider, still-muted palette (kept
-      // low-saturation on purpose, same reasoning as the original two: a
-      // neon-bright skyline would fight the glare fixes from round 3) gives
-      // real block-to-block variety instead.
-      const hue = choice([0x2b2f3a, 0x3a3226, 0x2f3a34, 0x33303f, 0x3a2f2f, 0x2a3540, 0x3a3730]);
-      const tex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
-      // Round-5 ("windows are too small"): each texture tile now has 5
-      // columns / 10 rows (down from 6/14 — see buildFacadeTexture) AND is
-      // stretched over a much bigger patch of wall before repeating (9
-      // units wide, 30 tall, instead of 6x6) — together that takes a window
-      // column from ~1 unit wide/0.43 tall to ~1.8 wide/3 tall, close to a
-      // real window+floor-height instead of a fine grid of tiny squares.
-      tex.repeat.set(Math.max(1, bw / 9), Math.max(1, bh / 30));
-      // Round-6 ("every building looks the same" + a real bug: windows on
-      // the roof): three cosmetic "styles" reusing the same facade texture
-      // so the palette work above still matters, plus a plain roof cap
-      // material — a BoxGeometry with ONE material stretches the window
-      // texture over all 6 faces, top and bottom included, which is exactly
-      // why flat rooftops were showing a window grid instead of bare roofing
-      // under the AC units. A material ARRAY (one per box face, order
-      // px/nx/py/ny/pz/nz) puts the facade texture on the four vertical
-      // sides only and a flat, unlit-looking cap on top/bottom.
-      const style = choice(['concrete', 'concrete', 'glass', 'brick']);
-      let sideMat;
-      if (style === 'glass') {
-        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.28, metalness: 0.55, color: 0xcfe0ff });
-      } else if (style === 'brick') {
-        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.02, color: 0xffdcc0 });
-      } else {
-        sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
-      }
-      const roofCapMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.9, metalness: 0.05 });
-      const building = new THREE.Mesh(
-        new THREE.BoxGeometry(bw, bh, bd),
-        [sideMat, sideMat, roofCapMat, roofCapMat, sideMat, sideMat]
-      );
-      building.position.set(cx, bh / 2, cz);
-      building.castShadow = true;
-      building.receiveShadow = true;
-      group.add(building);
-
-      // Round-6 city-diversity pass: ~30% of towers over a minimum height
-      // get a smaller stepped-back second tier instead of a flat top — a
-      // cheap way to break up the skyline into more than just "same box,
-      // different height" without touching the physics footprint (the
-      // setback tier is short/light enough that driving into a building's
-      // base is unaffected, and it sits above where the wheel raycasts and
-      // resolveBuildingOverlap() in main.js ever look).
-      const stepped = bh > 26 && rand(0, 1) < 0.3;
-      if (stepped) {
-        const topW = bw * rand(0.45, 0.68);
-        const topD = bd * rand(0.45, 0.68);
-        const topH = rand(6, 16);
-        const topTex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
-        topTex.repeat.set(Math.max(1, topW / 9), Math.max(1, topH / 30));
-        const topSideMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: sideMat.roughness, metalness: sideMat.metalness, color: sideMat.color.getHex() });
-        const top = new THREE.Mesh(
-          new THREE.BoxGeometry(topW, topH, topD),
-          [topSideMat, topSideMat, roofCapMat, roofCapMat, topSideMat, topSideMat]
-        );
-        top.position.set(cx, bh + topH / 2, cz);
-        top.castShadow = true;
-        top.receiveShadow = true;
-        group.add(top);
-      }
-      const roofY = bh; // clutter always sits on the LOWER roof, even when a stepped-back tier exists above it — reads better than floating clutter up on the setback
-
-      // A thin parapet ledge around the roofline — purely decorative (no
-      // collider, same reasoning as the AC units below: it's well above
-      // where any wheel raycast or building-overlap check ever samples),
-      // but it's what actually reads as "a building" instead of "a box"
-      // from a distance/rooftop view.
-      if (rand(0, 1) < 0.7) {
-        const parapetH = 0.5;
-        const parapet = new THREE.Mesh(new THREE.BoxGeometry(bw + 0.15, parapetH, bd + 0.15), roofCapMat);
-        parapet.position.set(cx, bh + parapetH / 2, cz);
-        group.add(parapet);
-      }
-
-      const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(bw / 2, bh / 2, bd / 2)) });
-      body.position.set(cx, bh / 2, cz);
-      body.userData = { isBuilding: true };
-      world.addBody(body);
-      buildingBodies.push(body);
-      footprints.push({ x: cx, z: cz, w: bw, d: bd, h: bh });
-
-      // A parked car (or two) tucked into the sidewalk margin along a
-      // building edge — cheap "lived-in city" detail, and a solid obstacle
-      // players can actually crash into (dents the body just like a wall).
-      if (rand(0, 1) < 0.55) {
-        addParkedCar(THREE, CANNON, group, world, footprint, bw, bd, cx, cz);
-      }
-
-      // rooftop clutter — AC units + the occasional antenna, purely visual,
-      // just enough to break up the flat roofline silhouette
+      // Round-7 ("сделай город разнообразным ... в реальной жизни каждый
+      // дом в другом месте другой формы, а у тебя всё сеткой" — the city
+      // reads as a grid because it WAS one: exactly one centered box per
+      // block, same footprint rules every time). The street grid itself
+      // stays uniform on purpose (traffic.js's node graph, the traffic
+      // lights, lane markings and crosswalks all key off evenly-spaced
+      // streetCoords, and rebuilding that into an irregular road network is
+      // a much bigger, riskier change than what was actually asked for) —
+      // but nothing says every BLOCK has to hold one centered building. A
+      // real city block usually holds several separate buildings of
+      // different footprints jammed in at slightly different angles, not
+      // one uniform tower dead-center. splitLots() below recursively
+      // carves this block's square footprint into 1-3 irregular
+      // rectangular lots (random split axis, random split point, a gap
+      // between them for a walkway) — each lot then gets its own
+      // independent height/style/rotation, so neighboring buildings on the
+      // same block can be completely different sizes and shapes.
+      const lotCount = choice([1, 1, 1, 1, 2, 2, 3]);
+      const lots = splitLots(cx, cz, footprint, footprint, lotCount, rand(2, 4)).filter((l) => l.w > 5 && l.d > 5);
       const roofMat = new THREE.MeshStandardMaterial({ color: 0x1a1c22, roughness: 0.8, metalness: 0.2 });
-      const acCount = randInt(1, 3);
-      for (let a = 0; a < acCount; a++) {
-        const acW = rand(0.8, 1.6);
-        const ac = new THREE.Mesh(new THREE.BoxGeometry(acW, acW * 0.5, acW), roofMat);
-        ac.position.set(
-          cx + rand(-bw / 2 + acW, bw / 2 - acW),
-          roofY + acW * 0.25,
-          cz + rand(-bd / 2 + acW, bd / 2 - acW)
+
+      lots.forEach((lot, lotIdx) => {
+        // Building footprint smaller than the lot to leave a walkable margin
+        const bw = Math.max(4, lot.w - rand(2, 5));
+        const bd = Math.max(4, lot.d - rand(2, 5));
+        const bh = rand(10, 62);
+        // A few degrees of yaw per lot — "each building at its own slight
+        // angle" is a big part of what reads as real rather than gridded,
+        // and stays small enough (±0.1 rad ≈ ±5.7°) that a building never
+        // swings a corner out past its own lot into the road.
+        const angle = rand(-0.1, 0.1);
+        // Round-5 graphics pass: was a coin-flip between exactly 2 facade
+        // colors for the whole city — every block ended up looking like a
+        // repeat of the same two towers. A wider, still-muted palette (kept
+        // low-saturation on purpose, same reasoning as the original two: a
+        // neon-bright skyline would fight the glare fixes from round 3) gives
+        // real block-to-block (now lot-to-lot) variety instead.
+        const hue = choice([0x2b2f3a, 0x3a3226, 0x2f3a34, 0x33303f, 0x3a2f2f, 0x2a3540, 0x3a3730]);
+        const tex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
+        // Round-5 ("windows are too small"): each texture tile now has 5
+        // columns / 10 rows (down from 6/14 — see buildFacadeTexture) AND is
+        // stretched over a much bigger patch of wall before repeating (9
+        // units wide, 30 tall, instead of 6x6) — together that takes a window
+        // column from ~1 unit wide/0.43 tall to ~1.8 wide/3 tall, close to a
+        // real window+floor-height instead of a fine grid of tiny squares.
+        tex.repeat.set(Math.max(1, bw / 9), Math.max(1, bh / 30));
+        // Round-6 ("every building looks the same" + a real bug: windows on
+        // the roof): three cosmetic "styles" reusing the same facade texture
+        // so the palette work above still matters, plus a plain roof cap
+        // material — a BoxGeometry with ONE material stretches the window
+        // texture over all 6 faces, top and bottom included, which is exactly
+        // why flat rooftops were showing a window grid instead of bare roofing
+        // under the AC units. A material ARRAY (one per box face, order
+        // px/nx/py/ny/pz/nz) puts the facade texture on the four vertical
+        // sides only and a flat, unlit-looking cap on top/bottom.
+        const style = choice(['concrete', 'concrete', 'glass', 'brick']);
+        let sideMat;
+        if (style === 'glass') {
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.28, metalness: 0.55, color: 0xcfe0ff });
+        } else if (style === 'brick') {
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.02, color: 0xffdcc0 });
+        } else {
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
+        }
+        const roofCapMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.9, metalness: 0.05 });
+
+        // Everything for this one building is built in LOCAL space (offsets
+        // from its own origin) inside a Group, and only the Group itself is
+        // positioned/rotated onto the lot — much simpler than rotating each
+        // child mesh's own position individually.
+        const bGroup = new THREE.Group();
+        const building = new THREE.Mesh(
+          new THREE.BoxGeometry(bw, bh, bd),
+          [sideMat, sideMat, roofCapMat, roofCapMat, sideMat, sideMat]
         );
-        ac.castShadow = true;
-        group.add(ac);
-      }
-      if (rand(0, 1) < 0.35) {
-        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, rand(2, 5), 6), roofMat);
-        antenna.position.set(cx + rand(-bw / 3, bw / 3), roofY + antenna.geometry.parameters.height / 2, cz + rand(-bd / 3, bd / 3));
-        group.add(antenna);
-      }
+        building.position.set(0, bh / 2, 0);
+        building.castShadow = true;
+        building.receiveShadow = true;
+        bGroup.add(building);
+
+        // Round-6 city-diversity pass: ~30% of towers over a minimum height
+        // get a smaller stepped-back second tier instead of a flat top — a
+        // cheap way to break up the skyline into more than just "same box,
+        // different height" without touching the physics footprint (the
+        // setback tier is short/light enough that driving into a building's
+        // base is unaffected, and it sits above where the wheel raycasts and
+        // resolveBuildingOverlap() in main.js ever look).
+        const stepped = bh > 26 && rand(0, 1) < 0.3;
+        if (stepped) {
+          const topW = bw * rand(0.45, 0.68);
+          const topD = bd * rand(0.45, 0.68);
+          const topH = rand(6, 16);
+          const topTex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
+          topTex.repeat.set(Math.max(1, topW / 9), Math.max(1, topH / 30));
+          const topSideMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: sideMat.roughness, metalness: sideMat.metalness, color: sideMat.color.getHex() });
+          const top = new THREE.Mesh(
+            new THREE.BoxGeometry(topW, topH, topD),
+            [topSideMat, topSideMat, roofCapMat, roofCapMat, topSideMat, topSideMat]
+          );
+          top.position.set(0, bh + topH / 2, 0);
+          top.castShadow = true;
+          top.receiveShadow = true;
+          bGroup.add(top);
+        }
+        const roofY = bh; // clutter always sits on the LOWER roof, even when a stepped-back tier exists above it — reads better than floating clutter up on the setback
+
+        // A thin parapet ledge around the roofline — purely decorative (no
+        // collider, same reasoning as the AC units below: it's well above
+        // where any wheel raycast or building-overlap check ever samples),
+        // but it's what actually reads as "a building" instead of "a box"
+        // from a distance/rooftop view.
+        if (rand(0, 1) < 0.7) {
+          const parapetH = 0.5;
+          const parapet = new THREE.Mesh(new THREE.BoxGeometry(bw + 0.15, parapetH, bd + 0.15), roofCapMat);
+          parapet.position.set(0, bh + parapetH / 2, 0);
+          bGroup.add(parapet);
+        }
+
+        // rooftop clutter — AC units + the occasional antenna, purely visual,
+        // just enough to break up the flat roofline silhouette
+        const acCount = randInt(1, 3);
+        for (let a = 0; a < acCount; a++) {
+          const acW = rand(0.8, 1.6);
+          const ac = new THREE.Mesh(new THREE.BoxGeometry(acW, acW * 0.5, acW), roofMat);
+          ac.position.set(rand(-bw / 2 + acW, bw / 2 - acW), roofY + acW * 0.25, rand(-bd / 2 + acW, bd / 2 - acW));
+          ac.castShadow = true;
+          bGroup.add(ac);
+        }
+        if (rand(0, 1) < 0.35) {
+          const antHeight = rand(2, 5);
+          const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, antHeight, 6), roofMat);
+          antenna.position.set(rand(-bw / 3, bw / 3), roofY + antHeight / 2, rand(-bd / 3, bd / 3));
+          bGroup.add(antenna);
+        }
+
+        bGroup.position.set(lot.cx, 0, lot.cz);
+        bGroup.rotation.y = angle;
+        group.add(bGroup);
+
+        const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(bw / 2, bh / 2, bd / 2)) });
+        body.position.set(lot.cx, bh / 2, lot.cz);
+        body.quaternion.setFromEuler(0, angle, 0);
+        body.userData = { isBuilding: true };
+        world.addBody(body);
+        buildingBodies.push(body);
+        footprints.push({ x: lot.cx, z: lot.cz, w: bw, d: bd, h: bh });
+
+        // A parked car (or two) tucked into the sidewalk margin along a
+        // building edge — cheap "lived-in city" detail, and a solid obstacle
+        // players can actually crash into (dents the body just like a wall).
+        // Only the first (largest) lot on a multi-building block gets one,
+        // same overall chance as before — every lot rolling independently
+        // would clutter a 3-way-split block with cars on every scrap of curb.
+        if (lotIdx === 0 && rand(0, 1) < 0.55) {
+          addParkedCar(THREE, CANNON, group, world, lot.w, bw, bd, lot.cx, lot.cz);
+        }
+      });
     }
   }
 
@@ -334,7 +372,7 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
       // overhangs the road/crossing (like a real streetlight) instead of
       // hanging out over the sidewalk/building behind the pole.
       const armAngle = Math.atan2(-sz, -sx);
-      addStreetlight(THREE, group, x + sx * streetlightCornerOffset, z + sz * streetlightCornerOffset, armAngle);
+      addStreetlight(THREE, CANNON, world, group, x + sx * streetlightCornerOffset, z + sz * streetlightCornerOffset, armAngle);
     }
   }
 
@@ -370,8 +408,36 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
 }
 // (helpers kept below)
 
-function addTree(THREE, group, x, z) {
+// Round 7 ("каждый дом в другом месте другой формы" — irregular city
+// blocks): recursive binary-space-partition of a square block footprint
+// into `n` rectangular lots of DIFFERENT sizes at DIFFERENT offsets, each
+// separated by `gap` (a walkway/alley) — the standard trick for generating
+// plausible irregular city parcels out of one rectangle, rather than
+// tiling it into n equal, still-gridded pieces. Splits alternate axis with
+// some randomness (biased toward splitting the longer side, like a real
+// subdivided lot) and the split point itself is randomized (not always
+// half), so a 2-way split reliably gives one clearly bigger lot and one
+// clearly smaller one instead of two identical halves.
+function splitLots(cx, cz, w, d, n, gap) {
+  if (n <= 1) return [{ cx, cz, w, d }];
+  const nA = Math.ceil(n / 2), nB = n - nA;
+  const frac = rand(0.35, 0.65);
+  const splitAlongX = w >= d ? rand(0, 1) < 0.75 : rand(0, 1) < 0.25;
+  if (splitAlongX) {
+    const wA = w * frac - gap / 2, wB = w * (1 - frac) - gap / 2;
+    if (wA < 4 || wB < 4) return [{ cx, cz, w, d }]; // too thin to usefully split further
+    const xA = cx - w / 2 + wA / 2, xB = cx + w / 2 - wB / 2;
+    return [...splitLots(xA, cz, wA, d, nA, gap), ...splitLots(xB, cz, wB, d, nB, gap)];
+  }
+  const dA = d * frac - gap / 2, dB = d * (1 - frac) - gap / 2;
+  if (dA < 4 || dB < 4) return [{ cx, cz, w, d }];
+  const zA = cz - d / 2 + dA / 2, zB = cz + d / 2 - dB / 2;
+  return [...splitLots(cx, zA, w, dA, nA, gap), ...splitLots(cx, zB, w, dB, nB, gap)];
+}
+
+function addTree(THREE, CANNON, world, group, x, z) {
   const trunkH = rand(1.6, 2.4);
+  const trunkR = 0.16; // between the geometry's 0.14/0.18 taper — close enough for a collider
   const trunk = new THREE.Mesh(
     new THREE.CylinderGeometry(0.14, 0.18, trunkH, 7),
     new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.9 })
@@ -388,6 +454,15 @@ function addTree(THREE, group, x, z) {
   canopy.position.set(x, trunkH + canopyR * 0.7, z);
   canopy.castShadow = true;
   group.add(canopy);
+
+  // Round-7 ("add colliders on streetlights and trees so I don't drive
+  // through them") — only the trunk needs a real collider (a car clipping
+  // through leaves above bumper height is normal in basically every driving
+  // game; clipping through the trunk at ground level is what actually looks
+  // broken). A thin static cylinder, same radius as the trunk mesh.
+  const trunkBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(trunkR, trunkR, trunkH, 8) });
+  trunkBody.position.set(x, trunkH / 2, z);
+  world.addBody(trunkBody);
 }
 
 const PARKED_CAR_COLORS = [0x8a1c1c, 0x1c3d8a, 0x2e2e33, 0xd8d8d0, 0x1c6b3d, 0x8a6a1c];
@@ -558,12 +633,19 @@ function addCrosswalks(THREE, group, streetCoords, groundSeamGap) {
   group.add(instNS, instEW);
 }
 
-function addStreetlight(THREE, group, x, z, armAngleRad = 0) {
+function addStreetlight(THREE, CANNON, world, group, x, z, armAngleRad = 0) {
   const poleMat = new THREE.MeshStandardMaterial({ color: 0x1c1e24, roughness: 0.5, metalness: 0.6 });
   const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 6, 8), poleMat);
   pole.position.set(x, 3, z);
   pole.castShadow = true;
   group.add(pole);
+
+  // Round-7: a real collider for the pole, same reasoning as addTree's
+  // trunk collider just above — thin, but solid, so it stops a car instead
+  // of the pole just being a visual prop cars drive straight through.
+  const poleBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(0.13, 0.13, 6, 8) });
+  poleBody.position.set(x, 3, z);
+  world.addBody(poleBody);
 
   // The arm/lamp/light used to be built straight along world +X, which was
   // fine back when the pole always stood at the intersection center (any
