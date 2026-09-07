@@ -1,4 +1,12 @@
 // Round 7: "add traffic lights so NPCs don't crash into each other."
+// Round 7 follow-up: "светофоры это просто шарики — они должны быть на
+// стойке, а сам светофор это прямоугольник с 3 кругами, на Г-образной
+// палке" — the bare glowing spheres read as UFOs, not traffic lights. Each
+// fixture is now a real signal: a vertical pole, a horizontal arm bending
+// off the top (the "Г" shape — vertical stroke + one horizontal stroke,
+// same bent-arm idea already used for streetlights in city.js), and a dark
+// rectangular signal head hanging off the arm's end with three lens
+// circles stacked on its face (red/yellow/green, top to bottom).
 //
 // A single GLOBAL signal phase shared by the whole city (every intersection
 // changes together) rather than per-intersection independent timers — this
@@ -7,12 +15,14 @@
 // each other", which a shared phase achieves just as well as per-node
 // timing while being far simpler to reason about and far cheaper to render.
 //
-// Visual footprint is kept small on purpose: every intersection gets two
-// small glowing spheres (one per axis, NS and EW) instead of full signal-head
-// models with poles/arms — and every NS sphere across the WHOLE CITY shares
-// one merged geometry + one material (same for EW), so changing the phase
-// is two material.color/.emissive assignments, not per-intersection state,
-// and the entire city's traffic lights cost exactly 2 draw calls total.
+// Performance stays the same trick as the old bare-sphere version, just
+// split further: every POLE+ARM+HEAD casing across the whole city (dark,
+// never changes) is one merged mesh/material, and every LENS CIRCLE of a
+// given color+axis across the whole city is its own merged mesh/material —
+// so a phase change is still just a handful of material.emissive
+// assignments, never per-fixture state, and the entire city's traffic
+// lights cost 7 draw calls total (1 structure + 3 lens colors × 2 axes)
+// regardless of how many intersections exist.
 
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
@@ -25,14 +35,18 @@ const PHASES = [
   { axis: 'both', state: 'red', ms: 800 },
 ];
 
-const COLORS = {
-  green: { color: 0x1fae4a, emissive: 0x2fff6a, intensity: 2.4 },
-  yellow: { color: 0xd8a520, emissive: 0xffcc33, intensity: 2.2 },
-  red: { color: 0x9a1a1a, emissive: 0xff2222, intensity: 2.2 },
+// `on`/`off` are both used as color AND emissive — an "off" lens isn't
+// fully black (real signal lenses are a dark tinted glass even unlit), just
+// much dimmer than the lit one.
+const LENS_COLORS = {
+  red: { on: 0xff2a2a, off: 0x3a1010 },
+  yellow: { on: 0xffcc33, off: 0x3a2e10 },
+  green: { on: 0x35ff6e, off: 0x0f2e18 },
 };
+const LENS_ORDER = ['red', 'yellow', 'green']; // top to bottom, like a real signal head
 
 export class TrafficLightSystem {
-  constructor(THREE, group, streetCoords, { offset = 3.4, height = 4.4 } = {}) {
+  constructor(THREE, group, streetCoords, { offset = 6.4, poleHeight = 3.3, armLen = 0.8 } = {}) {
     this._phaseIdx = 0;
     this._phaseElapsed = 0;
     // Start mid-cycle-ish (NS green, EW red) so the very first frame already
@@ -40,35 +54,108 @@ export class TrafficLightSystem {
     this._ns = 'green';
     this._ew = 'red';
 
-    this.nsMat = new THREE.MeshStandardMaterial({ color: COLORS.green.color, emissive: COLORS.green.emissive, emissiveIntensity: COLORS.green.intensity, roughness: 0.4 });
-    this.ewMat = new THREE.MeshStandardMaterial({ color: COLORS.red.color, emissive: COLORS.red.emissive, emissiveIntensity: COLORS.red.intensity, roughness: 0.4 });
-
-    const nsGeos = [];
-    const ewGeos = [];
-    for (const x of streetCoords) {
-      for (const z of streetCoords) {
-        const nsGeo = new THREE.SphereGeometry(0.3, 10, 10);
-        nsGeo.translate(x + offset, height, z);
-        nsGeos.push(nsGeo);
-        const ewGeo = new THREE.SphereGeometry(0.3, 10, 10);
-        ewGeo.translate(x, height, z + offset);
-        ewGeos.push(ewGeo);
+    // One shared material per (axis, lens color) — 6 total. Each backs a
+    // single merged mesh of every lens circle of that color+axis across the
+    // whole city, so lighting one up/dimming it down is one material edit,
+    // not a walk over every intersection.
+    this.lensMats = { ns: {}, ew: {} };
+    for (const axis of ['ns', 'ew']) {
+      for (const name of LENS_ORDER) {
+        this.lensMats[axis][name] = new THREE.MeshStandardMaterial({
+          color: LENS_COLORS[name].off, emissive: LENS_COLORS[name].off, emissiveIntensity: 0.2, roughness: 0.35,
+        });
       }
     }
-    const nsMesh = new THREE.Mesh(mergeGeometries(nsGeos), this.nsMat);
-    const ewMesh = new THREE.Mesh(mergeGeometries(ewGeos), this.ewMat);
-    group.add(nsMesh);
-    group.add(ewMesh);
-    nsGeos.forEach((g) => g.dispose());
-    ewGeos.forEach((g) => g.dispose());
+
+    const structureGeos = []; // pole + arm + signal-head casing, one shared dark material
+    const lensGeos = { ns: { red: [], yellow: [], green: [] }, ew: { red: [], yellow: [], green: [] } };
+
+    const headW = 0.34, headH = 0.9, headD = 0.22, lensR = 0.11, lensGap = 0.32;
+
+    // Builds one full fixture (pole/arm/head/lenses) at (px, pz), with the
+    // arm swinging off in direction `angle` (radians, standard atan2 sense)
+    // — the signal head ends up out at the end of the arm, and its lens
+    // face points back the way the arm came from, toward whoever is
+    // approaching the pole along that axis.
+    const buildFixture = (axis, px, pz, angle) => {
+      const poleGeo = new THREE.CylinderGeometry(0.07, 0.09, poleHeight, 8);
+      poleGeo.translate(px, poleHeight / 2, pz);
+      structureGeos.push(poleGeo);
+
+      const dirX = Math.cos(angle), dirZ = Math.sin(angle);
+      const bendY = poleHeight;
+
+      // The "Г" bend: a horizontal arm from the top of the pole out toward
+      // the road it controls — built along local +X then rotated to `angle`
+      // and dropped at the bend point, the same construction city.js's
+      // addStreetlight() already uses for its own arm.
+      const armGeo = new THREE.CylinderGeometry(0.045, 0.045, armLen, 8);
+      armGeo.rotateZ(Math.PI / 2);
+      armGeo.translate(armLen / 2, 0, 0);
+      armGeo.rotateY(-angle);
+      armGeo.translate(px, bendY, pz);
+      structureGeos.push(armGeo);
+
+      const headX = px + dirX * armLen, headZ = pz + dirZ * armLen;
+      const headY = bendY - headH / 2 - 0.1;
+      const headGeo = new THREE.BoxGeometry(headW, headH, headD);
+      headGeo.rotateY(-angle);
+      headGeo.translate(headX, headY, headZ);
+      structureGeos.push(headGeo);
+
+      // Lens circles on the face of the head pointing back along the arm's
+      // direction (away from the pole) — a thin thick disc, standing
+      // slightly proud of the casing so it doesn't z-fight with it.
+      const faceOffset = headD / 2 + 0.015;
+      const faceX = headX + dirX * faceOffset, faceZ = headZ + dirZ * faceOffset;
+      LENS_ORDER.forEach((name, i) => {
+        const ly = headY + headH / 2 - 0.22 - i * lensGap;
+        const lensGeo = new THREE.CylinderGeometry(lensR, lensR, 0.03, 14);
+        lensGeo.rotateX(Math.PI / 2); // circular faces now point along local Z
+        lensGeo.rotateY(-angle);
+        lensGeo.translate(faceX, ly, faceZ);
+        lensGeos[axis][name].push(lensGeo);
+      });
+    };
+
+    for (const x of streetCoords) {
+      for (const z of streetCoords) {
+        // NS fixture plants off to +X of the intersection, arm swings back
+        // toward -X so the head hangs out over the crossing it controls.
+        buildFixture('ns', x + offset, z, Math.PI);
+        // EW fixture plants off to +Z, arm swings back toward -Z.
+        buildFixture('ew', x, z + offset, -Math.PI / 2);
+      }
+    }
+
+    const structureMat = new THREE.MeshStandardMaterial({ color: 0x1c1e24, roughness: 0.55, metalness: 0.5 });
+    group.add(new THREE.Mesh(mergeGeometries(structureGeos), structureMat));
+    structureGeos.forEach((g) => g.dispose());
+
+    for (const axis of ['ns', 'ew']) {
+      for (const name of LENS_ORDER) {
+        const geos = lensGeos[axis][name];
+        group.add(new THREE.Mesh(mergeGeometries(geos), this.lensMats[axis][name]));
+        geos.forEach((g) => g.dispose());
+      }
+    }
+
+    this._applyState('ns', this._ns);
+    this._applyState('ew', this._ew);
   }
 
+  // Lights up the ONE lens matching `state` for this axis and dims the
+  // other two back to their unlit color — mirrors a real signal head, where
+  // exactly one of the three lenses is ever lit at once.
   _applyState(axis, state) {
-    const c = COLORS[state];
-    const mat = axis === 'ns' ? this.nsMat : this.ewMat;
-    mat.color.setHex(c.color);
-    mat.emissive.setHex(c.emissive);
-    mat.emissiveIntensity = c.intensity;
+    for (const name of LENS_ORDER) {
+      const mat = this.lensMats[axis][name];
+      const c = LENS_COLORS[name];
+      const lit = name === state;
+      mat.color.setHex(lit ? c.on : c.off);
+      mat.emissive.setHex(lit ? c.on : c.off);
+      mat.emissiveIntensity = lit ? 2.6 : 0.2;
+    }
   }
 
   update(dt) {

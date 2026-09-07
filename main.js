@@ -202,7 +202,16 @@ const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords
 // why a single global phase is enough here. traffic.update() below queries
 // it every frame to decide whether an AI car approaching a crossing should
 // brake.
-const trafficLights = new TrafficLightSystem(THREE, city.group, city.streetCoords);
+// Round-7 follow-up ("на обочине, а не посередине перекрёстка" — the pole
+// itself was planted well inside the road, only 3.4 units out on a road
+// that's ROAD_HALF_WIDTH=5.5 units wide each way): plant the pole past the
+// curb exactly like city.js's own streetlights do (ROAD_HALF_WIDTH + 0.9),
+// so the post stands on the sidewalk corner and only the signal head's arm
+// reaches out toward the road, instead of the whole fixture standing in
+// the middle of the crossing.
+const trafficLights = new TrafficLightSystem(THREE, city.group, city.streetCoords, {
+  offset: ROAD_HALF_WIDTH + 0.9,
+});
 
 setBootProgress(70, 'Настраиваем погоду…');
 const weather = new WeatherSystem(THREE, scene, city, city.groundMat, audio);
