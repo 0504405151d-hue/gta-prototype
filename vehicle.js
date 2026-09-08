@@ -439,6 +439,18 @@ export class Vehicle {
       tl.position.set(x, 0.45, -chassisL / 2 + 0.05);
       group.add(tl);
     });
+
+    // Round 10 ("ещё лучше графику" — машины): front/rear license plates —
+    // same reasoning as _buildLights() below for the truck/bus bodies, done
+    // inline here since the sedan builds its own lights rather than sharing
+    // that method.
+    const plateMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.55, metalness: 0.05 });
+    this.plateMat = plateMat;
+    [chassisL / 2 - 0.015, -chassisL / 2 + 0.015].forEach((pz) => {
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.24, 0.11, 0.015), plateMat);
+      plate.position.set(0, 0.3, pz);
+      group.add(plate);
+    });
     } else if (bodyStyle === 'truck') {
       this._buildTruckBody(group, chassisW, chassisH, chassisL, bodyMat, glassMat, trimMat, chromeMat);
     } else {
@@ -783,6 +795,20 @@ export class Vehicle {
       const handle = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.18, 0.04), chromeMat);
       handle.position.set(side * (chassisW / 2 + 0.01), 0.6, chassisL * 0.15);
       group.add(handle);
+    });
+
+    // Round 10 ("ещё лучше графику" — машины): a small light-colored plate
+    // on both bumpers — every body style so far had bumpers/lights/handles
+    // but nothing at all in the one spot every real car has a small
+    // consistently light rectangle. Own material (bumpers/handles are dark
+    // trim, lights are emissive) so it actually reads as a distinct plate
+    // rather than disappearing into whatever it's mounted on.
+    const plateMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.55, metalness: 0.05 });
+    this.plateMat = plateMat;
+    [chassisL / 2 + 0.005, -chassisL / 2 - 0.005].forEach((pz) => {
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(chassisW * 0.22, 0.11, 0.015), plateMat);
+      plate.position.set(0, 0.3, pz);
+      group.add(plate);
     });
   }
 
@@ -1364,6 +1390,20 @@ export class RemoteCar {
     headGeos.forEach((g) => g.dispose());
     group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
     tailGeos.forEach((g) => g.dispose());
+
+    // Round 10 ("ещё лучше графику" — машины): license plates — same detail
+    // the player's own sedan body just got, merged into one small mesh so
+    // this is still only +1 draw call with several other players connected.
+    const plateMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.55, metalness: 0.05 });
+    const plateGeos = [];
+    [2.05, -2.05].forEach((pz) => {
+      const pGeo = new THREE.BoxGeometry(0.4, 0.11, 0.015);
+      pGeo.translate(0, 0.3, pz);
+      plateGeos.push(pGeo);
+    });
+    group.add(new THREE.Mesh(mergeGeometries(plateGeos), plateMat));
+    plateGeos.forEach((g) => g.dispose());
+
     // Static wheels (no per-wheel telemetry travels over the network for
     // remote players, so these don't spin/steer) — still much better than a
     // body floating with no wheels at all. Two-tone (tire + rim disc) to
@@ -1557,6 +1597,20 @@ export class RemoteCar {
     headGeos.forEach((g) => g.dispose());
     group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
     tailGeos.forEach((g) => g.dispose());
+
+    // Round 10 ("ещё лучше графику" — машины): license plates, merged into
+    // their own tiny mesh (own light-colored material, so they can't just
+    // join the dark rim/light merges above) — same +1 draw call the sedan
+    // remote body below also pays for the same detail.
+    const plateMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.55, metalness: 0.05 });
+    const plateGeos = [];
+    [chassisL / 2 + 0.005, -chassisL / 2 - 0.005].forEach((pz) => {
+      const pGeo = new THREE.BoxGeometry(chassisW * 0.18, 0.1, 0.015);
+      pGeo.translate(0, 0.3, pz);
+      plateGeos.push(pGeo);
+    });
+    group.add(new THREE.Mesh(mergeGeometries(plateGeos), plateMat));
+    plateGeos.forEach((g) => g.dispose());
   }
 
   setTarget(state) {

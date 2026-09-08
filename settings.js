@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS = {
   volume: 1,           // 0..1 master volume multiplier
   graphics: 'high',    // 'low' | 'medium' | 'high' — shadow map size + fog draw distance + pixel ratio cap
   traffic: 'medium',   // 'off' | 'low' | 'medium' | 'high'
+  trafficSpeed: 'normal', // 'slow' | 'normal' | 'fast' — see TRAFFIC_SPEED_MULTIPLIERS below
   weather: 'clear',    // 'clear' | 'cloudy' | 'rain' | 'night'
   sensitivity: 1,      // free-cam mouse-look sensitivity multiplier
   minimap: true,
@@ -15,6 +16,13 @@ export const DEFAULT_SETTINGS = {
 };
 
 export const TRAFFIC_COUNTS = { off: 0, low: 8, medium: 16, high: 28 };
+
+// Round 9 ("сделай возможность настройки скорости трафика"): a live
+// multiplier on top of every AI car's own cruise/turn speed and personality
+// (see TrafficSystem.setSpeedMultiplier in traffic.js) — read fresh every
+// physics step, same as the suspension presets above, so switching this
+// takes effect immediately on cars already out on the road.
+export const TRAFFIC_SPEED_MULTIPLIERS = { slow: 0.6, normal: 1, fast: 1.5 };
 
 // In-game suspension softness picker ("сделай возможность прямо в игре
 // мягкость подвески выбрать"): 'standard' is exactly the softened tune from

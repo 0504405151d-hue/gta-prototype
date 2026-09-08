@@ -56,31 +56,32 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
   // GRID_N, and the old density fogged out most of the new far blocks.
   scene.fog = new THREE.FogExp2(0xd68a5c, 0.0028);
 
-  // A scatter of stars in the upper sky — cheap atmosphere for the dusk/night look.
-  {
-    const starCount = 500;
-    const starPos = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i++) {
-      const theta = rand(0, Math.PI * 2);
-      const phi = rand(0, Math.PI * 0.42); // keep to the upper dome only
-      const r = 550;
-      starPos[i * 3] = Math.cos(theta) * Math.sin(phi) * r;
-      starPos[i * 3 + 1] = Math.cos(phi) * r;
-      starPos[i * 3 + 2] = Math.sin(theta) * Math.sin(phi) * r;
-    }
-    const starGeo = new THREE.BufferGeometry();
-    starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-    const starMat = new THREE.PointsMaterial({
-      size: 2.2,
-      map: buildSoftDotTexture(THREE),
-      transparent: true,
-      opacity: 0.75,
-      depthWrite: false,
-      color: 0xdfe8ff,
-      sizeAttenuation: false,
-    });
-    scene.add(new THREE.Points(starGeo, starMat));
+  // A scatter of stars in the upper sky — cheap atmosphere for the dusk/night
+  // look. `starMat` is kept (not block-scoped away) so the day/night cycle
+  // (see dayNightCycle.js) can fade its opacity in at night and back out
+  // during the day.
+  const starCount = 500;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    const theta = rand(0, Math.PI * 2);
+    const phi = rand(0, Math.PI * 0.42); // keep to the upper dome only
+    const r = 550;
+    starPos[i * 3] = Math.cos(theta) * Math.sin(phi) * r;
+    starPos[i * 3 + 1] = Math.cos(phi) * r;
+    starPos[i * 3 + 2] = Math.sin(theta) * Math.sin(phi) * r;
   }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starMat = new THREE.PointsMaterial({
+    size: 2.2,
+    map: buildSoftDotTexture(THREE),
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false,
+    color: 0xdfe8ff,
+    sizeAttenuation: false,
+  });
+  scene.add(new THREE.Points(starGeo, starMat));
 
   // ---------- Lighting ----------
   // Was 2.4, then 1.9 — still reported as "too bright" (glossy clearcoat
@@ -94,10 +95,19 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
   sun.position.set(-140, 120, -80);
   sun.castShadow = true;
   sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
-  // Bounds scale with the city (CITY_HALF grew from 119 to 170 with the
-  // bigger grid) so the far edge of the map still gets real shadows instead
-  // of just going flat/unshadowed past the old, smaller frustum.
-  const shadowHalf = CITY_HALF + 50;
+  // Round 9 ("лучше тени"): this used to cover CITY_HALF+50 (~220 units) —
+  // wide enough for the whole static city, since the sun's target used to
+  // just sit fixed at the world origin forever. Now that main.js re-points
+  // `sun.target` at the player's own car every frame (see the "shadow
+  // follows the player" block in the game loop), the same fixed number of
+  // shadow-map texels only ever needs to cover the area actually around the
+  // player — a MUCH smaller world-space box, which is a straight sharpness
+  // win for free (same map resolution, far less area per texel) rather than
+  // needing a bigger shadowMapSize to get the same improvement. The
+  // trade-off is exactly what you'd expect: buildings far from the player
+  // stop casting real shadows and just go flat — a standard, normally
+  // unnoticed "shadow follows the camera" trick most games use.
+  const shadowHalf = 90;
   sun.shadow.camera.left = -shadowHalf;
   sun.shadow.camera.right = shadowHalf;
   sun.shadow.camera.top = shadowHalf;
@@ -346,6 +356,27 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
           addParkedCar(THREE, CANNON, group, world, lot.w, bw, bd, lot.cx, lot.cz);
         }
       });
+
+      // Round 9 ("детализация окружения"): regular building blocks got
+      // buildings + the occasional parked car but the actual sidewalk strip
+      // around them stayed bare pavement — plazas already read as "detailed"
+      // because they're the only place with trees. A couple of small, purely
+      // decorative (no collider — same call as the rooftop AC units/parapet
+      // above: cheap "lived-in" clutter, not a new obstacle to path around)
+      // items along the curb per block closes that gap without touching
+      // traffic.js's node graph or the road footprint at all.
+      const clutterCount = rand(0, 1) < 0.8 ? randInt(1, 3) : 0;
+      for (let c = 0; c < clutterCount; c++) {
+        const side = randInt(0, 3);
+        const along = rand(-footprint / 2 + 3, footprint / 2 - 3);
+        const inset = footprint / 2 - 1.1; // just inside the sidewalk's outer (curb) edge
+        let x, z;
+        if (side === 0) { x = cx + along; z = cz - inset; }
+        else if (side === 1) { x = cx + along; z = cz + inset; }
+        else if (side === 2) { x = cx - inset; z = cz + along; }
+        else { x = cx + inset; z = cz + along; }
+        addStreetClutter(THREE, group, x, z, choice(['bush', 'bush', 'bench', 'trash', 'hydrant']));
+      }
     }
   }
 
@@ -386,6 +417,9 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
   // ---------- Crosswalks at every intersection ----------
   addCrosswalks(THREE, group, streetCoords, GROUND_SEAM_GAP);
 
+  // ---------- Manhole covers scattered along the road surface ----------
+  addManholeCovers(THREE, group, streetCoords, GROUND_SEAM_GAP);
+
   // ---------- Spawn points (center plaza roads) ----------
   for (let k = 0; k < 8; k++) {
     const angle = (k / 8) * Math.PI * 2;
@@ -403,7 +437,7 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
 
   return {
     group, spawnPoints, propSpots, cityHalf: CITY_HALF, sun, buildingBodies, footprints, streetCoords,
-    hemi, skyMat, groundMat,
+    hemi, skyMat, groundMat, starsMat: starMat,
   };
 }
 // (helpers kept below)
@@ -471,6 +505,102 @@ function addTree(THREE, CANNON, world, group, x, z) {
   // car like any other structure") makes trees actually dangerous to ram.
   trunkBody.userData = { isBuilding: true };
   world.addBody(trunkBody);
+}
+
+// Round 9 ("детализация окружения") — small, purely decorative sidewalk
+// clutter with no physics body at all: these sit right at curb height on a
+// flat sidewalk slab that's already a real collider (see the curbBody above),
+// and at this size a car's own body would visibly clip a missing bench/bin
+// corner far less than the alternative of yet another tiny static Box body
+// for every single one, scattered by the hundred across a 10x10 city — same
+// "not worth a collider" call already made for parapets/AC units/antennas.
+function addStreetClutter(THREE, group, x, z, kind) {
+  const rotY = rand(0, Math.PI * 2);
+  if (kind === 'bush') {
+    const r = rand(0.35, 0.6);
+    const bush = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(r, 0),
+      new THREE.MeshStandardMaterial({ color: choice([0x2f6b3a, 0x3a7a42, 0x275e30]), roughness: 0.9, flatShading: true })
+    );
+    bush.position.set(x, r * 0.75, z);
+    bush.rotation.y = rotY;
+    bush.scale.y = 0.8;
+    bush.castShadow = true;
+    bush.receiveShadow = true;
+    group.add(bush);
+    return;
+  }
+  if (kind === 'trash') {
+    const canH = 0.6;
+    const can = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.22, 0.19, canH, 10),
+      new THREE.MeshStandardMaterial({ color: 0x2e3a2e, roughness: 0.7, metalness: 0.3 })
+    );
+    can.position.set(x, canH / 2, z);
+    can.rotation.y = rotY;
+    can.castShadow = true;
+    group.add(can);
+    const lid = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.24, 0.24, 0.05, 10),
+      new THREE.MeshStandardMaterial({ color: 0x1c241c, roughness: 0.6, metalness: 0.3 })
+    );
+    lid.position.set(x, canH + 0.025, z);
+    group.add(lid);
+    return;
+  }
+  if (kind === 'hydrant') {
+    // Round 10 ("ещё лучше графику" — детализация окружения): a small,
+    // brightly-colored prop that reads instantly even at a glance/low res,
+    // unlike the muted bush/trash/bench palette — a couple of red accents
+    // per block break up what's otherwise a lot of grey sidewalk and brick.
+    // No collider, same reasoning as the rest of this function.
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xc22a1e, roughness: 0.55, metalness: 0.2 });
+    const capMat = new THREE.MeshStandardMaterial({ color: 0xe8e2d0, roughness: 0.5, metalness: 0.3 });
+    const hGroup = new THREE.Group();
+    const bodyH = 0.5;
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.17, bodyH, 10), bodyMat);
+    body.position.y = bodyH / 2 + 0.05;
+    hGroup.add(body);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), capMat);
+    dome.position.y = bodyH + 0.05;
+    hGroup.add(dome);
+    const collarGeo = new THREE.CylinderGeometry(0.17, 0.17, 0.06, 10);
+    collarGeo.translate(0, 0.14, 0);
+    const nozzleGeos = [[0.16, 0], [-0.16, 0], [0, 0.16]].map(([nx, nz]) => {
+      const g = new THREE.CylinderGeometry(0.045, 0.045, 0.12, 8);
+      g.rotateX(Math.PI / 2);
+      g.rotateY(Math.atan2(nx, nz));
+      g.translate(nx * 1.05, 0.3, nz * 1.05);
+      return g;
+    });
+    hGroup.add(new THREE.Mesh(mergeGeometries([collarGeo, ...nozzleGeos]), capMat));
+    hGroup.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    hGroup.position.set(x, 0, z);
+    hGroup.rotation.y = rotY;
+    group.add(hGroup);
+    return;
+  }
+  // bench
+  const seatMat = new THREE.MeshStandardMaterial({ color: 0x6b4a30, roughness: 0.85 });
+  const legMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.6, metalness: 0.5 });
+  const benchGroup = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.08, 0.5), seatMat);
+  seat.position.y = 0.42;
+  benchGroup.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 0.08), seatMat);
+  back.position.set(0, 0.68, -0.21);
+  benchGroup.add(back);
+  const legGeos = [];
+  [[-0.6, 0.1], [0.6, 0.1], [-0.6, -0.15], [0.6, -0.15]].forEach(([lx, lz]) => {
+    const g = new THREE.BoxGeometry(0.06, 0.4, 0.06);
+    g.translate(lx, 0.2, lz);
+    legGeos.push(g);
+  });
+  benchGroup.add(new THREE.Mesh(mergeGeometries(legGeos), legMat));
+  benchGroup.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  benchGroup.position.set(x, 0, z);
+  benchGroup.rotation.y = rotY;
+  group.add(benchGroup);
 }
 
 const PARKED_CAR_COLORS = [0x8a1c1c, 0x1c3d8a, 0x2e2e33, 0xd8d8d0, 0x1c6b3d, 0x8a6a1c];
@@ -639,6 +769,60 @@ function addCrosswalks(THREE, group, streetCoords, groundSeamGap) {
   instEW.instanceMatrix.needsUpdate = true;
 
   group.add(instNS, instEW);
+}
+
+// Round 10 ("ещё лучше графику" — детализация окружения): flat manhole
+// covers embedded in the road surface, one per travel lane per street — the
+// asphalt itself was otherwise a single flat, featureless plane broken up
+// only by the lane dashes/crosswalks (which sit on top of it, not IN it).
+// Same InstancedMesh + intersection-clearance pattern as addLaneMarkings()
+// above, just a round flat cylinder instead of a dash, and offset off the
+// street centerline so a manhole never lands under a lane-marking dash.
+function addManholeCovers(THREE, group, streetCoords, groundSeamGap) {
+  const radius = 0.42;
+  const y = groundSeamGap + 0.008; // sits just under the lane-dash/crosswalk height, flush with the road
+  const range = (GRID_N * BLOCK_PITCH) / 2 + 30; // matches the perimeter streets addLaneMarkings already covers
+  const step = 11; // spacing along the street between covers
+  const clearance = ROAD_HALF_WIDTH + 2; // keep clear of intersections/crosswalk bands
+  const laneOffset = ROAD_HALF_WIDTH * 0.45; // off-centerline, in one of the travel lanes rather than straddling the double line
+
+  const mat = new THREE.MeshStandardMaterial({ color: 0x3a3a3c, roughness: 0.75, metalness: 0.5 });
+  const geo = new THREE.CylinderGeometry(radius, radius, 0.016, 14);
+
+  const perStreet = Math.ceil((range * 2) / step) + 2;
+  const maxCount = streetCoords.length * perStreet * 2; // *2: one offset lane on each side of the centerline
+  const inst = new THREE.InstancedMesh(geo, mat, maxCount);
+  inst.receiveShadow = true;
+
+  const m = new THREE.Matrix4();
+  let count = 0;
+  // North-south streets: covers offset along X (into each lane), repeated along Z
+  for (const x of streetCoords) {
+    for (let z = -range; z <= range; z += step) {
+      if (streetCoords.some((zc) => Math.abs(z - zc) < clearance)) continue;
+      for (const ox of [-laneOffset, laneOffset]) {
+        m.makeTranslation(x + ox, y, z);
+        inst.setMatrixAt(count++, m);
+      }
+    }
+  }
+  // East-west streets: covers offset along Z, repeated along X — skip anywhere
+  // an east-west street's span overlaps a north-south street's own coordinate
+  // (that intersection area is already excluded above from the other pass,
+  // and covers here would otherwise double up right on top of it).
+  for (const z of streetCoords) {
+    for (let x = -range; x <= range; x += step) {
+      if (streetCoords.some((xc) => Math.abs(x - xc) < clearance)) continue;
+      for (const oz of [-laneOffset, laneOffset]) {
+        m.makeTranslation(x, y, z + oz);
+        inst.setMatrixAt(count++, m);
+      }
+    }
+  }
+  inst.count = count;
+  inst.instanceMatrix.needsUpdate = true;
+
+  group.add(inst);
 }
 
 function addStreetlight(THREE, CANNON, world, group, x, z, armAngleRad = 0) {

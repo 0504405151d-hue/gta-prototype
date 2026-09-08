@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { buildCity, ROAD_HALF_WIDTH } from './city.js';
@@ -16,8 +17,9 @@ import { Network } from './network.js';
 import { TrafficSystem } from './traffic.js';
 import { TrafficLightSystem } from './trafficLights.js';
 import { choice, setAnisotropy } from './utils.js';
-import { loadSettings, saveSettings, TRAFFIC_COUNTS } from './settings.js';
+import { loadSettings, saveSettings, TRAFFIC_COUNTS, TRAFFIC_SPEED_MULTIPLIERS } from './settings.js';
 import { WeatherSystem } from './weather.js';
+import { DayNightCycle } from './dayNightCycle.js';
 import { CAR_PRESETS, CAR_COLORS } from './carPresets.js';
 import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 
@@ -38,6 +40,16 @@ const settings = loadSettings();
 // regenerate at the new size since a THREE.js shadow map can't just be
 // resized in place once it exists).
 const SHADOW_SIZES = { low: 512, medium: 1024, high: 2048, ultra: 4096 };
+
+// Round 10 ("ещё лучше графику" — свет и постобработка): ambient occlusion
+// (see the GTAOPass block below) is real per-pixel geometry work — a whole
+// extra normals+depth render of the scene, plus a denoise pass — genuinely
+// costly, unlike a cheap fullscreen bloom tint. `gtao` is declared here
+// (before applyGraphicsSettings' first call at boot) so that function can
+// toggle it on/off per graphics tier the same way it already toggles the
+// shadow map, without a temporal-dead-zone crash from referencing it before
+// its real assignment further down where the composer is built.
+let gtao = null;
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
@@ -75,6 +87,35 @@ pmremGenerator.dispose();
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
+
+// Round 10 ("ещё лучше графику" — свет и постобработка): ambient occlusion.
+// Without it, every inside corner (car wheel against the road, a building
+// wall meeting the sidewalk, a bush pressed against a wall) gets exactly the
+// same lit/shadowed value as the open flat ground next to it — real contact
+// shadow only ever came from the one directional sun light, which reads as
+// "flat" the moment the sun's own shadow doesn't happen to fall there.
+// GTAOPass (three.js's modern ground-truth AO, replacing the older, noisier
+// SSAOPass from earlier examples) darkens exactly those creases based on
+// actual nearby geometry, independent of the sun — it's what makes the
+// difference between "objects placed in a scene" and "objects that sit in
+// it". `radius` is tuned to this game's real-world-ish scale (car ~1.9m
+// wide, curb ~0.18m tall) rather than the shader's own default of 0.25
+// (tuned for a much smaller demo scene) — 0.35 catches wheel/curb/wall
+// contact shadows without smudging AO across an entire car body. Gated to
+// the "high"/"ultra" graphics tiers only (see applyGraphicsSettings) since
+// it's genuinely one of the most expensive passes here: a full extra
+// normals+depth render of the scene plus a Poisson denoise pass, every
+// single frame.
+gtao = new GTAOPass(scene, camera, innerWidth, innerHeight, undefined, {
+  radius: 0.35,
+  distanceExponent: 1,
+  thickness: 1,
+  scale: 1,
+});
+gtao.output = GTAOPass.OUTPUT.Default;
+gtao.enabled = settings.graphics === 'high' || settings.graphics === 'ultra';
+composer.addPass(gtao);
+
 // threshold raised from 0.86→0.94→0.97, strength 0.5→0.42 — still getting
 // reports of glare/hotspots (round 3), even after the clearcoat materials
 // themselves were softened (vehicle.js/traffic.js/city.js). Pushed both
@@ -90,6 +131,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
+  gtao.setSize(innerWidth, innerHeight);
 });
 
 // Graphics quality setting: pixel ratio cap + shadow map on/off/quality/size
@@ -108,6 +150,13 @@ function applyGraphicsSettings(level) {
   renderer.shadowMap.enabled = level !== 'low';
   renderer.shadowMap.type = (level === 'high' || level === 'ultra') ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.shadowMap.needsUpdate = true;
+  // Round 10: ambient occlusion only on the two tiers that already asked for
+  // the expensive stuff (soft PCF shadows, the 2x+ pixel-ratio cap) — it's
+  // one of the priciest passes in the whole composer chain (an extra
+  // normals/depth render of the entire scene plus a Poisson denoise pass
+  // every frame), so "low"/"medium" skip it entirely rather than paying for
+  // it at a resolution/framerate that can't really show it off anyway.
+  if (gtao) gtao.enabled = level === 'high' || level === 'ultra';
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +267,7 @@ setBootProgress(58, 'Выпускаем трафик…');
 const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords, {
   laneOffset: ROAD_HALF_WIDTH / 2,
   count: TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium,
+  speedMultiplier: TRAFFIC_SPEED_MULTIPLIERS[settings.trafficSpeed] ?? 1,
 });
 // Round 7 ("add traffic lights so NPCs don't crash into each other"): one
 // shared signal phase for the whole (grid) city — see trafficLights.js for
@@ -241,7 +291,12 @@ const trafficLights = new TrafficLightSystem(THREE, CANNON, world, city.group, c
 });
 
 setBootProgress(70, 'Настраиваем погоду…');
-const weather = new WeatherSystem(THREE, scene, city, city.groundMat, audio);
+// Round 9: a real day/night cycle — owns the sun's position/hue on its own
+// slow clock (see dayNightCycle.js); WeatherSystem's presets (rain/cloudy/
+// clear/forced night) now read their base sun/hemi/sky/fog values live from
+// it every frame instead of a value fixed once at startup.
+const dayNight = new DayNightCycle(THREE, city);
+const weather = new WeatherSystem(THREE, scene, city, city.groundMat, audio, dayNight);
 weather.set(settings.weather);
 
 setBootProgress(80, 'Готовим машину…');
@@ -322,7 +377,8 @@ addEventListener('keydown', (e) => {
     car.setHeadlightsOn(headlightsOn);
     setNetStatus(headlightsOn ? '💡 Фары включены' : 'Фары выключены');
   }
-  // Round 7: Q cycles the in-car radio (off → 3 stations → off). Skipped
+  // Round 7: Q cycles the in-car radio (off → stations → off, see radio.js
+  // for the current lineup). Skipped
   // while free-flying (cameraMode === 2) since Q/E already control that
   // camera's altitude there (see readInput() below) — overloading the same
   // key would change the radio station every time the player flies down.
@@ -550,6 +606,7 @@ const volumeRangeEl = document.getElementById('volumeRange');
 const volumeValEl = document.getElementById('volumeVal');
 const graphicsSelectEl = document.getElementById('graphicsSelect');
 const trafficSelectEl = document.getElementById('trafficSelect');
+const trafficSpeedSelectEl = document.getElementById('trafficSpeedSelect');
 const weatherSelectEl = document.getElementById('weatherSelect');
 const sensRangeEl = document.getElementById('sensRange');
 const sensValEl = document.getElementById('sensVal');
@@ -563,6 +620,7 @@ function refreshSettingsUI() {
   volumeValEl.textContent = Math.round(settings.volume * 100);
   graphicsSelectEl.value = settings.graphics;
   trafficSelectEl.value = settings.traffic;
+  trafficSpeedSelectEl.value = settings.trafficSpeed;
   weatherSelectEl.value = settings.weather;
   sensRangeEl.value = Math.round(settings.sensitivity * 100);
   sensValEl.textContent = settings.sensitivity.toFixed(1);
@@ -596,6 +654,11 @@ graphicsSelectEl.addEventListener('change', () => {
 trafficSelectEl.addEventListener('change', () => {
   settings.traffic = trafficSelectEl.value;
   traffic.setCount(TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium);
+  saveSettings(settings);
+});
+trafficSpeedSelectEl.addEventListener('change', () => {
+  settings.trafficSpeed = trafficSpeedSelectEl.value;
+  traffic.setSpeedMultiplier(TRAFFIC_SPEED_MULTIPLIERS[settings.trafficSpeed] ?? 1);
   saveSettings(settings);
 });
 weatherSelectEl.addEventListener('change', () => {

@@ -23,6 +23,27 @@ const TRAFFIC_COLORS = [0x2b6fd8, 0xd0d0d6, 0x1a1c22, 0xb32020, 0xd7a52c, 0x2f7d
 // the steering-angle block in update().
 const MAX_STEER_VISUAL = 0.55;
 
+// Round 9 regression fix ("всё равно есть аварии иногда"): the "am I too
+// close to the car ahead" check used a fixed lookahead distance per car
+// (followLookahead, 5.5-9 units) with no idea how fast that car was
+// actually going — which was harmless back when a separate dead-code bug
+// (see the car.speed easing fix in update() below) silently capped every
+// car's real speed near 3 m/s no matter what targetSpeed/turnSpeed said, so
+// stopping distance was always tiny. Fixing THAT bug let cars actually reach
+// their intended cruise speed (up to ~8 * 1.28 ≈ 10 m/s with the personality
+// spread below) — and a real stress test (test_traffic_obb.mjs) immediately
+// caught what that exposed: at 10 m/s, braking at TRAFFIC_BRAKE_DECEL takes
+// 10²/(2*9) ≈ 5.6m, which eats almost the entire low end of the old fixed
+// 5.5-9 unit lookahead range before the car even reacts, leaving no margin
+// and producing real rear-end overlaps that weren't there before. The fix
+// used at the actual braking-check call site (below) is a proper
+// physics-based stopping distance (plus a fixed safety margin for the other
+// car's own length/uncertainty), floored at the personality's own
+// followLookahead so slow cars keep their original cautious-vs-relaxed
+// spread instead of this collapsing it.
+const TRAFFIC_BRAKE_DECEL = 9; // m/s^2 — matches the braking deceleration applied in update() below
+const BRAKE_SAFETY_MARGIN = 2.5; // meters — other car's length + a buffer, not just a bare stopping-distance calc
+
 // Round 6 ("make NPC cars as detailed/realistic as the player's own"):
 // traffic used to be a single generic sedan-shaped box for every car on the
 // road, just recolored — every one of a dozen+ cars on screen had the exact
@@ -151,6 +172,16 @@ function buildTrafficCarMesh(THREE, color, styleKey) {
     railGeo.translate(side * cabinHalfW, cabinTopY, L * style.cabinZFrac);
     chromeGeos.push(railGeo);
   });
+  // Round 10 ("ещё лучше графику" — машины): a roof whip antenna on roughly
+  // half of all traffic cars — free silhouette variety (a dozen+ identical
+  // rooflines on the same street was one of the more obvious remaining
+  // "these are clones" tells). Folded into this same chrome merge, so cars
+  // that get one still cost zero extra draw calls.
+  if (rand(0, 1) < 0.5) {
+    const antGeo = new THREE.CylinderGeometry(0.012, 0.018, 0.5, 6);
+    antGeo.translate(cabinHalfW * 0.6, cabinTopY + 0.25, cabinRearZ + 0.1);
+    chromeGeos.push(antGeo);
+  }
   group.add(new THREE.Mesh(mergeGeometries(chromeGeos), chromeTrimMat));
   chromeGeos.forEach((g) => g.dispose());
 
@@ -226,6 +257,22 @@ function buildTrafficCarMesh(THREE, color, styleKey) {
   headGeos.forEach((g) => g.dispose());
   group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
   tailGeos.forEach((g) => g.dispose());
+
+  // Round 10 ("ещё лучше графику" — машины): license plates — every traffic
+  // car so far had bumpers/handles/lights but nothing in the one spot every
+  // real car has a small, consistently light rectangle; own merged mesh
+  // (own light material, can't join the dark trim or emissive light merges
+  // above) so it's still just +1 draw call per traffic car.
+  const plateMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.55, metalness: 0.05 });
+  const plateGeos = [];
+  [L / 2 - 0.005, -L / 2 + 0.005].forEach((pz) => {
+    const pGeo = new THREE.BoxGeometry(W * 0.2, 0.1, 0.015);
+    pGeo.translate(0, H * 0.22, pz);
+    plateGeos.push(pGeo);
+  });
+  group.add(new THREE.Mesh(mergeGeometries(plateGeos), plateMat));
+  plateGeos.forEach((g) => g.dispose());
+
   return { group, bodyMat, dims: { w: W, h: H, l: L }, frontWheels };
 }
 
@@ -237,7 +284,7 @@ const DIRS = [
 ];
 
 export class TrafficSystem {
-  constructor(THREE, CANNON, world, scene, streetCoords, { laneOffset = 2.6, count = 16 } = {}) {
+  constructor(THREE, CANNON, world, scene, streetCoords, { laneOffset = 2.6, count = 16, speedMultiplier = 1 } = {}) {
     this.THREE = THREE;
     this.CANNON = CANNON;
     this.world = world;
@@ -246,7 +293,18 @@ export class TrafficSystem {
     this.laneOffset = laneOffset;
     this.n = streetCoords.length;
     this.cars = [];
+    // Round 9 ("сделай возможность настройки скорости трафика"): a live
+    // dial on top of each car's own random cruise-speed pick and personality
+    // (see _spawnCar's speedFactor) — applied at the point speeds are USED
+    // in update() rather than baked into any stored per-car value, so
+    // flipping it in the phone settings takes effect on already-moving cars
+    // immediately instead of only affecting cars spawned after the change.
+    this.speedMultiplier = speedMultiplier;
     this.setCount(count);
+  }
+
+  setSpeedMultiplier(m) {
+    this.speedMultiplier = m;
   }
 
   // World-space position of a lane point at grid node (ix,iz), offset to the
@@ -269,11 +327,47 @@ export class TrafficSystem {
     return out;
   }
 
+  // Round 9 regression fix (found by the same stress test as the stopping-
+  // distance fix above): a brand new car used to pick a totally random
+  // node/direction/t with no idea where any ALREADY-SPAWNED car was, so it
+  // could land right on top of (or a couple meters from) an existing car —
+  // an instant overlap the collision-avoidance logic in update() can't undo
+  // after the fact (it only prevents a car from driving INTO another one
+  // that's still approaching, not un-stick two bodies that spawned already
+  // overlapping). This used to be masked by the same dead-code speed bug
+  // fixed above: cars barely moving meant a bad spawn drifted apart slowly
+  // without ever registering as a sustained overlap. A handful of retries
+  // against the real cruise speeds now needed is a cheap fix — city streets
+  // have plenty of node/direction/t combinations, so a clear one within a
+  // few attempts is the overwhelmingly common case; the loop just falls back
+  // to its last attempt rather than looping forever on the rare city state
+  // where every attempt is crowded.
+  _pickSpawnSpot() {
+    const MIN_SPAWN_GAP = 9;
+    let spot = null;
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const ix = randInt(0, this.n - 1);
+      const iz = randInt(0, this.n - 1);
+      const dirs = this._validDirs(ix, iz, null);
+      const dir = choice(dirs);
+      const t = rand(0, 1);
+      const from = this._laneWorld(ix, iz, dir.dx, dir.dz);
+      const to = this._laneWorld(ix + dir.dx, iz + dir.dz, dir.dx, dir.dz);
+      const x = from.x + (to.x - from.x) * t;
+      const z = from.z + (to.z - from.z) * t;
+      spot = { ix, iz, dir, t };
+      let tooClose = false;
+      for (const other of this.cars) {
+        const dx = other.mesh.position.x - x, dz = other.mesh.position.z - z;
+        if (dx * dx + dz * dz < MIN_SPAWN_GAP * MIN_SPAWN_GAP) { tooClose = true; break; }
+      }
+      if (!tooClose) break;
+    }
+    return spot;
+  }
+
   _spawnCar() {
-    const ix = randInt(0, this.n - 1);
-    const iz = randInt(0, this.n - 1);
-    const dirs = this._validDirs(ix, iz, null);
-    const dir = choice(dirs);
+    const { ix, iz, dir, t: spawnT } = this._pickSpawnSpot();
     const color = choice(TRAFFIC_COLORS);
     const styleKey = choice(CAR_STYLE_KEYS);
 
@@ -284,13 +378,25 @@ export class TrafficSystem {
     const body = new this.CANNON.Body({ mass: 0, type: this.CANNON.Body.KINEMATIC, shape });
     this.world.addBody(body);
 
+    // Round 9 ("разнообразнее поведение машин"): each car gets its own
+    // fixed-for-life "personality" instead of every car sampling the exact
+    // same speed range — a cautious driver cruises slower AND keeps more
+    // distance from the car ahead; a more aggressive one does the reverse.
+    // Multiplied onto (not replacing) the existing per-segment random speed
+    // picks below, so there's still frame-to-frame variety on top of the
+    // car's own baseline character.
+    const speedFactor = rand(0.82, 1.28);
+    const followLookahead = rand(5.5, 9); // more cautious cars start braking farther back
+    const reactionDelay = rand(0, 0.45); // a beat of human-like hesitation pulling away
+
     const car = {
       mesh, body, bodyMat, baseColor: color, dims, frontWheels,
       ix, iz, dx: dir.dx, dz: dir.dz,
-      t: rand(0, 1),
-      speed: rand(4.5, 8),
-      targetSpeed: rand(4.5, 8),
-      turnSpeed: 5,
+      t: spawnT,
+      speedFactor, followLookahead, reactionDelay,
+      speed: rand(4.5, 8) * speedFactor,
+      targetSpeed: rand(4.5, 8) * speedFactor,
+      turnSpeed: 5 * speedFactor,
       turn: null, // set while rounding a corner — see _beginTurn()/_placeCarOnArc()
       // Round 8 ("ездили по правилам", no more constant pile-ups): a car
       // waiting to turn left across oncoming traffic locks in its chosen
@@ -301,6 +407,13 @@ export class TrafficSystem {
       pendingPick: null,
       yieldWait: false,
       zeroSpeedTime: 0,
+      // Round 9 regression fix: how many more seconds the anti-gridlock
+      // override below forces this car unblocked for — see its comment.
+      deadlockOverride: 0,
+      // Round 9: reactionTimer/_wasBlocked implement the reactionDelay
+      // above — see the "reaction delay" block in update().
+      reactionTimer: 0,
+      _wasBlocked: false,
       steerAngle: 0,
       lastYaw: Math.atan2(dir.dx, dir.dz),
       lastPos: new this.THREE.Vector3(),
@@ -381,7 +494,7 @@ export class TrafficSystem {
     car.turn = { p0, p1: { x: nodeX, z: nodeZ }, p2, s: 0, len: Math.max(chord * 1.18, 2) };
     car.dx = newDir.dx;
     car.dz = newDir.dz;
-    car.turnSpeed = rand(3, 5); // real drivers slow down for corners, not just intersections with cars in them
+    car.turnSpeed = rand(3, 5) * car.speedFactor; // real drivers slow down for corners, not just intersections with cars in them
   }
 
   // Position + heading partway along the current turn arc (quadratic
@@ -478,12 +591,28 @@ export class TrafficSystem {
           // this check can't wedge two genuinely turning cars into a
           // standoff that lasts forever the way two independently-parked
           // ones could.
+          const stoppingLookahead = Math.max(
+            car.followLookahead,
+            (car.speed * car.speed) / (2 * TRAFFIC_BRAKE_DECEL) + BRAKE_SAFETY_MARGIN
+          );
           if (car.turn || other.turn) {
+            // Round 9 regression fix (same class of bug as the straight-line
+            // stopping-distance fix above, found by the same stress test): a
+            // FIXED 2.6-unit threshold here was fine back when the dead-code
+            // speed bug capped every car near 3 m/s, but a car now legitimately
+            // rounding a corner at up to ~6-7 m/s doesn't stop within 2.6
+            // units at TRAFFIC_BRAKE_DECEL — it coasts on well past that
+            // trigger distance before its speed actually reaches 0, ending up
+            // properly overlapping the other car instead of just "close to"
+            // it (confirmed with a standalone stress-test trace: entered this
+            // check at dist=3.9 while still doing 6.9 m/s, braked too late,
+            // came to rest fully inside the other car at dist=0.99). Reusing
+            // the same stopping-distance floor here fixes it the same way.
             const ddx = other.mesh.position.x - car.mesh.position.x;
             const ddz = other.mesh.position.z - car.mesh.position.z;
-            if (Math.hypot(ddx, ddz) < 2.6) { blocked = true; break; }
+            if (Math.hypot(ddx, ddz) < stoppingLookahead) { blocked = true; break; }
           }
-          if (this._isAheadAndClose(car, other.mesh.position, 2.2, 7)) { blocked = true; break; }
+          if (this._isAheadAndClose(car, other.mesh.position, 2.2, stoppingLookahead)) { blocked = true; break; }
         }
       }
       if (!blocked) {
@@ -505,31 +634,90 @@ export class TrafficSystem {
         if (!trafficLights.isGreenForAxis(axis)) blocked = true;
       }
 
+      // Round 9 ("разнообразнее поведение машин"): a brief per-car pause
+      // right after whatever was actually holding it back clears, so a
+      // whole queue doesn't move off in perfect lockstep the instant a
+      // light turns green or the car ahead pulls away — some drivers react
+      // quicker than others. Only triggers on the false→true→false edge (the
+      // "just became unblocked" moment), not every frame it happens to be
+      // clear, and always yields to the anti-gridlock override below.
+      if (!blocked && car._wasBlocked) car.reactionTimer = car.reactionDelay;
+      if (!blocked && car.reactionTimer > 0) {
+        car.reactionTimer -= dt;
+        blocked = true;
+      }
+      car._wasBlocked = blocked;
+
       // Anti-gridlock safety net: if a car has sat essentially stationary
       // AND "blocked" for an implausibly long stretch — longer than one full
       // red-light cycle could ever legitimately hold it (see PHASES in
-      // trafficLights.js: worst case is well under 12s) — something has
+      // trafficLights.js: worst case is yellow+all-red+the-other-axis'-
+      // green+yellow+all-red ≈ 1.5+3.2+7+1.5+3.2 ≈ 16.4s — this MUST stay
+      // above that or a car still legitimately waiting out its own red would
+      // get shoved through it early, which is exactly the "runs a red
+      // light" bug this whole system exists to prevent) — something has
       // wedged it (a scripted-AI edge case neither of the checks above
       // anticipated, not a real, currently-relevant obstruction), and it
       // should ease back onto the road rather than sit there forever.
-      if (blocked && Math.abs(car.speed) < 0.1 && car.stunTime <= 0 && !car.yieldWait) {
+      //
+      // Round 9 regression fix (caught by test_traffic_obb.mjs after the
+      // stopping-distance fix above let cars reach real cruise speed): this
+      // override used to just set `blocked = false` for the exact frame it
+      // triggered, one time. That's enough to escape a merely-too-long red
+      // light (nothing was ever physically in the way — the very next
+      // frame's real distance/lookahead checks come back clear because
+      // there never was a real obstruction, just an overlong "is it my
+      // turn" wait). It is NOT enough when what's actually wedging the car
+      // is another car overlapping it (e.g. from a crowded spawn) — one
+      // frame barely moves it, so the very next frame's real checks
+      // immediately see the same overlap and set blocked = true again,
+      // and zeroSpeedTime restarts from 0. The two cars then sit re-wedged
+      // forever, each getting a single powerless twitch of "freedom" every
+      // 20 seconds — exactly the sustained overlap the stress test caught.
+      // Forcing blocked = false for a full couple of seconds (not one
+      // frame) gives a car enough consecutive unblocked frames to actually
+      // accelerate away and physically clear whatever it's overlapping,
+      // the same way a real driver eases all the way past an obstruction
+      // instead of inching forward one frame at a time.
+      if (car.deadlockOverride > 0) {
+        car.deadlockOverride -= dt;
+        blocked = false;
+        car.zeroSpeedTime = 0;
+      } else if (blocked && Math.abs(car.speed) < 0.1 && car.stunTime <= 0 && !car.yieldWait) {
         car.zeroSpeedTime = (car.zeroSpeedTime || 0) + dt;
-        if (car.zeroSpeedTime > 14) blocked = false;
+        if (car.zeroSpeedTime > 20) {
+          car.deadlockOverride = 2.5;
+          blocked = false;
+          car.zeroSpeedTime = 0;
+        }
       } else {
         car.zeroSpeedTime = 0;
       }
 
-      const cruiseTarget = car.turn ? car.turnSpeed : car.targetSpeed;
-      car.targetSpeed = blocked ? 0 : cruiseTarget;
-      car.speed += ((blocked ? 0 : Math.max(car.speed, 3)) - car.speed) * Math.min(1, dt * 2.2);
-      if (blocked) car.speed = Math.max(0, car.speed - dt * 9);
+      // Round 9 ("сделай возможность настройки скорости трафика"): this used
+      // to ease toward `Math.max(car.speed, 3)` — a leftover that, on
+      // inspection, never actually used car.targetSpeed/turnSpeed for
+      // anything: it only ever holds the CURRENT speed steady (or nudges it
+      // up to a 3 m/s floor), so a car that had braked for ANY reason —
+      // even briefly — would then cruise at whatever it happened to decay
+      // to instead of recovering back to its own intended cruise speed. Now
+      // eases toward the car's actual per-segment target (turn or straight,
+      // itself already scaled by the car's own speedFactor "personality"),
+      // times the live traffic-speed dial below — which is also what makes
+      // that setting affect cars already out on the road, not just newly
+      // spawned ones. `this.speedMultiplier` is read fresh every frame
+      // rather than baked into any stored per-car field, so flipping the
+      // phone setting takes effect immediately.
+      const cruiseTarget = (car.turn ? car.turnSpeed : car.targetSpeed) * this.speedMultiplier;
+      car.speed += ((blocked ? 0 : cruiseTarget) - car.speed) * Math.min(1, dt * 2.2);
+      if (blocked) car.speed = Math.max(0, car.speed - dt * TRAFFIC_BRAKE_DECEL);
 
       if (car.turn) {
         car.turn.s += (car.speed * dt) / car.turn.len;
         if (car.turn.s >= 1) {
           car.turn = null;
           car.t = 0;
-          car.targetSpeed = rand(4.5, 8);
+          car.targetSpeed = rand(4.5, 8) * car.speedFactor;
           this._placeCar(car);
         } else {
           this._placeCarOnArc(car);
@@ -581,7 +769,7 @@ export class TrafficSystem {
             car.ix = nix;
             car.iz = niz;
             if (pick.dx === car.dx && pick.dz === car.dz) {
-              car.targetSpeed = rand(4.5, 8);
+              car.targetSpeed = rand(4.5, 8) * car.speedFactor;
               this._placeCar(car);
             } else {
               this._beginTurn(car, pick);

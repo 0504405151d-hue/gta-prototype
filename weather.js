@@ -101,7 +101,18 @@ export class WeatherSystem {
   // `audio`: optional AudioSystem instance (see audio.js's playThunder) —
   // when provided, a rain-weather lightning strike also plays a delayed
   // thunder rumble; entirely optional so this class still works standalone.
-  constructor(THREE, scene, city, roadMat, audio = null) {
+  // `dayNight`: optional DayNightCycle instance (see dayNightCycle.js).
+  // Round 9: previously `this.base` was a fixed snapshot of the sun/hemi/
+  // fog/sky values taken once at construction, and every preset here was
+  // just a flat percentage of THAT one unchanging number forever. With a
+  // day/night cycle now moving the sun on its own clock, that snapshot has
+  // to become a LIVE read instead — see _presetValues() below — so that
+  // e.g. "Дождь" actually looks different at noon than at midnight, rather
+  // than always subtracting the same fixed amount from a value that never
+  // otherwise moved. Sun POSITION and HUE stay entirely DayNightCycle's own
+  // job (see that file) — this class still only ever touches intensity,
+  // fog, the hemisphere light, the sky gradient, and road wetness.
+  constructor(THREE, scene, city, roadMat, audio = null, dayNight = null) {
     this.THREE = THREE;
     this.scene = scene;
     this.sun = city.sun;
@@ -109,13 +120,17 @@ export class WeatherSystem {
     this.skyMat = city.skyMat;
     this.roadMat = roadMat;
     this.audio = audio;
+    this.dayNight = dayNight;
 
     this.base = {
       sunI: this.sun.intensity,
       fogD: scene.fog.density,
       hemiI: this.hemi.intensity,
+      hemiSky: this.hemi.color.clone(),
+      hemiGround: this.hemi.groundColor.clone(),
       top: this.skyMat.uniforms.topColor.value.clone(),
       bottom: this.skyMat.uniforms.bottomColor.value.clone(),
+      fogColor: scene.fog.color.clone(),
       roadRough: roadMat.roughness,
       roadEnv: roadMat.envMapIntensity ?? 1,
     };
@@ -139,13 +154,31 @@ export class WeatherSystem {
     this.set('clear', true);
   }
 
+  // Live base values every preset's percentages multiply against — the
+  // day/night cycle's current sun/hemi/sky/fog when one is attached,
+  // otherwise the fixed construction-time snapshot (so this class still
+  // works standalone, e.g. in older tests, without a DayNightCycle).
+  _liveBase() {
+    return this.dayNight ? this.dayNight.getBase() : this.base;
+  }
+
   _presetValues(name) {
     const p = PRESETS[name] || PRESETS.clear;
-    const sky = this.skyTargets[p.sky] || this.skyTargets.clear;
+    const live = this._liveBase();
+    // 'clear' tracks whatever the sky actually looks like right now (so it's
+    // the one preset that visibly cycles through day/night); 'overcast' and
+    // 'night' stay their own fixed look regardless of time of day — an
+    // overcast sky reads about the same at 9am or 4pm, and picking "Ночь"
+    // is meant to force actual darkness even if the cycle's clock currently
+    // says otherwise.
+    const sky = p.sky === 'clear' ? { top: live.top, bottom: live.bottom } : (this.skyTargets[p.sky] || this.skyTargets.clear);
     return {
-      sunI: this.base.sunI * p.sunMul,
+      sunI: live.sunI * p.sunMul,
       fogD: this.base.fogD * p.fogMul,
-      hemiI: this.base.hemiI * p.hemiMul,
+      fogColor: live.fogColor || this.base.fogColor,
+      hemiI: live.hemiI * p.hemiMul,
+      hemiSky: live.hemiSky || this.base.hemiSky,
+      hemiGround: live.hemiGround || this.base.hemiGround,
       top: sky.top,
       bottom: sky.bottom,
       roadRough: p.wet ? Math.max(0.12, this.base.roadRough * 0.3) : this.base.roadRough,
@@ -157,7 +190,10 @@ export class WeatherSystem {
   _applyValues(v) {
     this.sun.intensity = v.sunI;
     this.scene.fog.density = v.fogD;
+    this.scene.fog.color.copy(v.fogColor);
     this.hemi.intensity = v.hemiI;
+    this.hemi.color.copy(v.hemiSky);
+    this.hemi.groundColor.copy(v.hemiGround);
     this.skyMat.uniforms.topColor.value.copy(v.top);
     this.skyMat.uniforms.bottomColor.value.copy(v.bottom);
     this.roadMat.roughness = v.roadRough;
@@ -172,7 +208,10 @@ export class WeatherSystem {
     this._from = {
       sunI: this.sun.intensity,
       fogD: this.scene.fog.density,
+      fogColor: this.scene.fog.color.clone(),
       hemiI: this.hemi.intensity,
+      hemiSky: this.hemi.color.clone(),
+      hemiGround: this.hemi.groundColor.clone(),
       top: this.skyMat.uniforms.topColor.value.clone(),
       bottom: this.skyMat.uniforms.bottomColor.value.clone(),
       roadRough: this.roadMat.roughness,
@@ -193,18 +232,39 @@ export class WeatherSystem {
   }
 
   update(dt, followPos) {
+    // Advance the sun's own clock first (position + hue — entirely its own
+    // concern, see dayNightCycle.js) so everything below already reads
+    // this frame's up-to-date live base, not last frame's. Re-center its
+    // orbit (and shadow target) on the player first, using the same
+    // followPos the rain system already gets — see the shrunk shadow
+    // frustum comment in city.js for why this matters.
+    if (this.dayNight) {
+      if (followPos) this.dayNight.setFollowPosition(followPos);
+      this.dayNight.update(dt);
+    }
+
     if (this._t < 1) {
       this._t = Math.min(1, this._t + dt / TRANSITION_DURATION);
       const s = this._t;
       const lerp = (a, b) => a + (b - a) * s;
       this.sun.intensity = lerp(this._from.sunI, this._to.sunI);
       this.scene.fog.density = lerp(this._from.fogD, this._to.fogD);
+      this.scene.fog.color.copy(this._from.fogColor).lerp(this._to.fogColor, s);
       this.hemi.intensity = lerp(this._from.hemiI, this._to.hemiI);
+      this.hemi.color.copy(this._from.hemiSky).lerp(this._to.hemiSky, s);
+      this.hemi.groundColor.copy(this._from.hemiGround).lerp(this._to.hemiGround, s);
       this.skyMat.uniforms.topColor.value.copy(this._from.top).lerp(this._to.top, s);
       this.skyMat.uniforms.bottomColor.value.copy(this._from.bottom).lerp(this._to.bottom, s);
       this.roadMat.roughness = lerp(this._from.roadRough, this._to.roadRough);
       this.roadMat.envMapIntensity = lerp(this._from.roadEnv, this._to.roadEnv);
       if (this._t >= 1 && this._rainFadeOut) this.rain.mesh.visible = false;
+    } else if (this.dayNight) {
+      // No weather-preset transition in flight, but the day/night base is
+      // still moving underneath — recompute the current preset's live
+      // values fresh every frame so e.g. plain "Ясно" keeps cycling through
+      // day/night instead of freezing at whatever it looked like the
+      // moment the last transition finished.
+      this._applyValues(this._presetValues(this.current));
     }
 
     if (this.rain.mesh.visible) this.rain.update(dt, followPos);

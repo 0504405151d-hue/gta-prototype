@@ -26,13 +26,30 @@
 
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
+// Round 9 ("иногда всё равно бывают аварии"): the all-red clearance gap
+// between phases used to be 800ms. traffic.js only ever brakes a car for a
+// red light BEFORE it commits to crossing (the stop-line window ends at
+// car.t=0.93, just short of the intersection) — a car that entered right at
+// the tail end of yellow is then "committed" and keeps going regardless of
+// what the light does next, exactly like a real driver already in the box.
+// The intersection itself is roughly 2×ROAD_HALF_WIDTH (~11 units) wide,
+// plus however much of the car's own length still has to clear it — for a
+// car moving at a typical AI cruise/turn speed that's comfortably more than
+// one second of driving, not 0.8s. So a car that just barely made it in
+// under yellow could still physically be inside the box the instant the
+// OTHER axis went green and a fresh car started across — a real, if rare,
+// T-bone that no amount of stop-line braking logic can catch, because by
+// then the light isn't what's stopping it. 800ms → 3200ms gives every
+// entered car enough time to actually clear the box before the cross
+// traffic is let in, at the cost of a slightly longer pause between phases
+// (still short next to the 7s green itself).
 const PHASES = [
   { axis: 'ns', state: 'green', ms: 7000 },
   { axis: 'ns', state: 'yellow', ms: 1500 },
-  { axis: 'both', state: 'red', ms: 800 }, // all-red clearance gap
+  { axis: 'both', state: 'red', ms: 3200 }, // all-red clearance gap
   { axis: 'ew', state: 'green', ms: 7000 },
   { axis: 'ew', state: 'yellow', ms: 1500 },
-  { axis: 'both', state: 'red', ms: 800 },
+  { axis: 'both', state: 'red', ms: 3200 },
 ];
 
 // `on`/`off` are both used as color AND emissive — an "off" lens isn't
