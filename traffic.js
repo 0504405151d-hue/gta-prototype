@@ -19,6 +19,9 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const CAR_W = 1.9, CAR_H = 1.3, CAR_L = 4.2;
 const TRAFFIC_COLORS = [0x2b6fd8, 0xd0d0d6, 0x1a1c22, 0xb32020, 0xd7a52c, 0x2f7d4a, 0x6b6f76];
+// Visual-only cap on how far the front wheels are ever shown turned — see
+// the steering-angle block in update().
+const MAX_STEER_VISUAL = 0.55;
 
 // Round 6 ("make NPC cars as detailed/realistic as the player's own"):
 // traffic used to be a single generic sedan-shaped box for every car on the
@@ -154,21 +157,50 @@ function buildTrafficCarMesh(THREE, color, styleKey) {
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9 });
   const rimMat = new THREE.MeshStandardMaterial({ color: 0xaeb2b8, roughness: 0.4, metalness: 0.8, envMapIntensity: 0.55 });
   const wheelRadius = Math.min(0.44, 0.34 + (H - 1.3) * 0.1);
-  const wheelSpots = [[-W / 2, L / 2 - 0.7], [W / 2, L / 2 - 0.7], [-W / 2, -L / 2 + 0.6], [W / 2, -L / 2 + 0.6]];
-  const rimGeos = [];
-  wheelSpots.forEach(([wx, wz]) => {
+  const frontZ = L / 2 - 0.7, rearZ = -L / 2 + 0.6;
+  // Round 8 ("во время поворота передние колеса поворачивались"): the front
+  // pair used to be plain meshes baked at a fixed heading, same as the rear
+  // pair — nothing on the car ever visually steered, so even a perfectly
+  // smooth curved path read as the whole car sliding sideways rather than
+  // turning like a real one. The rear wheels stay exactly as before (their
+  // rim geometry stays merged into one shared mesh for the draw-call
+  // budget), but each FRONT wheel (tire + its own rim, unmerged so each can
+  // rotate independently) now sits inside its own pivot Group positioned at
+  // the wheel's local origin — update() below just sets that pivot's
+  // rotation.y from the car's current steering angle every frame, exactly
+  // the same "rotate a small child group around Y" trick vehicle.js already
+  // uses for the player's own front wheels.
+  const frontWheels = [];
+  const rearRimGeos = [];
+  [
+    { x: -W / 2, z: frontZ, front: true },
+    { x: W / 2, z: frontZ, front: true },
+    { x: -W / 2, z: rearZ, front: false },
+    { x: W / 2, z: rearZ, front: false },
+  ].forEach(({ x: wx, z: wz, front }) => {
     const wheel = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.28, 14), wheelMat);
     wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, wheelRadius, wz);
-    group.add(wheel);
-    const rGeo = new THREE.CylinderGeometry(wheelRadius * 0.56, wheelRadius * 0.56, 0.3, 12);
-    rGeo.rotateZ(Math.PI / 2);
-    rGeo.translate(wx, wheelRadius, wz);
-    rimGeos.push(rGeo);
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius * 0.56, wheelRadius * 0.56, 0.3, 12), rimMat);
+    rim.rotation.z = Math.PI / 2;
+    if (front) {
+      const pivot = new THREE.Group();
+      pivot.position.set(wx, wheelRadius, wz);
+      pivot.add(wheel);
+      pivot.add(rim);
+      group.add(pivot);
+      frontWheels.push(pivot);
+    } else {
+      wheel.position.set(wx, wheelRadius, wz);
+      group.add(wheel);
+      const rGeo = new THREE.CylinderGeometry(wheelRadius * 0.56, wheelRadius * 0.56, 0.3, 12);
+      rGeo.rotateZ(Math.PI / 2);
+      rGeo.translate(wx, wheelRadius, wz);
+      rearRimGeos.push(rGeo);
+    }
   });
-  const rimMesh = new THREE.Mesh(mergeGeometries(rimGeos), rimMat);
-  group.add(rimMesh);
-  rimGeos.forEach((g) => g.dispose());
+  const rearRimMesh = new THREE.Mesh(mergeGeometries(rearRimGeos), rimMat);
+  group.add(rearRimMesh);
+  rearRimGeos.forEach((g) => g.dispose());
   // Fake (non-lit) head/tail lamps — an actual light source per traffic car
   // would tank performance with a dozen+ of them on screen, so these are
   // emissive-only, just like the parked cars. Round-4: added a slim DRL
@@ -194,7 +226,7 @@ function buildTrafficCarMesh(THREE, color, styleKey) {
   headGeos.forEach((g) => g.dispose());
   group.add(new THREE.Mesh(mergeGeometries(tailGeos), tailMat));
   tailGeos.forEach((g) => g.dispose());
-  return { group, bodyMat, dims: { w: W, h: H, l: L } };
+  return { group, bodyMat, dims: { w: W, h: H, l: L }, frontWheels };
 }
 
 // Four axis-aligned directions in street-grid INDEX space (exactly one of
@@ -245,7 +277,7 @@ export class TrafficSystem {
     const color = choice(TRAFFIC_COLORS);
     const styleKey = choice(CAR_STYLE_KEYS);
 
-    const { group: mesh, bodyMat, dims } = buildTrafficCarMesh(this.THREE, color, styleKey);
+    const { group: mesh, bodyMat, dims, frontWheels } = buildTrafficCarMesh(this.THREE, color, styleKey);
     this.scene.add(mesh);
 
     const shape = new this.CANNON.Box(new this.CANNON.Vec3(dims.w / 2, dims.h / 2, dims.l / 2));
@@ -253,13 +285,24 @@ export class TrafficSystem {
     this.world.addBody(body);
 
     const car = {
-      mesh, body, bodyMat, baseColor: color, dims,
+      mesh, body, bodyMat, baseColor: color, dims, frontWheels,
       ix, iz, dx: dir.dx, dz: dir.dz,
       t: rand(0, 1),
       speed: rand(4.5, 8),
       targetSpeed: rand(4.5, 8),
       turnSpeed: 5,
       turn: null, // set while rounding a corner — see _beginTurn()/_placeCarOnArc()
+      // Round 8 ("ездили по правилам", no more constant pile-ups): a car
+      // waiting to turn left across oncoming traffic locks in its chosen
+      // direction here (see the t>=1 decision block in update()) instead of
+      // re-rolling a new random direction every single frame it's stuck
+      // waiting — and yieldWait forces it to keep braking on every
+      // subsequent frame until the crossing is actually clear.
+      pendingPick: null,
+      yieldWait: false,
+      zeroSpeedTime: 0,
+      steerAngle: 0,
+      lastYaw: Math.atan2(dir.dx, dir.dz),
       lastPos: new this.THREE.Vector3(),
       // Damage reaction state — see registerHit() and its use in update()
       // below. hitFlash drives a brief blinking dark-damage tint on the
@@ -401,10 +444,45 @@ export class TrafficSystem {
       // a lightweight stand-in for real lane reservation/intersection
       // priority, just enough that traffic doesn't visibly drive through
       // itself (or the player) in a straight line.
-      let blocked = car.stunTime > 0;
+      //
+      // Round 8 ("постоянные аварии" once traffic density goes up): this
+      // used to be ONLY the heading-based "ahead in my lane" check below —
+      // fine for two cars following each other down the same straight lane,
+      // but blind to anything whose heading differs from ours, which is
+      // exactly every car turning through (or crossing) an intersection.
+      // With enough cars on the road two turning arcs — or a turning car and
+      // a straight one on the crossing street — would silently pass through
+      // each other with zero braking, because neither was ever "ahead" of
+      // the other along either car's own heading. A plain omnidirectional
+      // "something is right on top of us" distance check (same idea already
+      // used for the player/remote-player `obstacles` below) closes that
+      // gap regardless of either car's heading.
+      let blocked = car.stunTime > 0 || car.yieldWait;
       if (!blocked) {
         for (const other of this.cars) {
           if (other === car) continue;
+          // The omnidirectional distance check only matters for the case it
+          // was added for — at least one of the two cars mid-turn, where
+          // headings genuinely don't line up with either car's own "ahead"
+          // cone. Applying it unconditionally to EVERY pair turned out to
+          // cause its own, worse bug: two cars that are simply stopped near
+          // the same corner for unrelated reasons (e.g. each waiting on its
+          // own street's red light, and the two streets' stop-line points
+          // happen to sit within a couple of units of each other by plain
+          // intersection geometry) would then permanently hold each other
+          // "too close to move" — neither one is a real collision risk to
+          // the other, but neither can ever get far enough away to clear the
+          // check either, since neither is actually driving anywhere. Two
+          // cars actually converging while at least one is turning don't
+          // have that failure mode: a turn is a short, bounded maneuver, so
+          // this check can't wedge two genuinely turning cars into a
+          // standoff that lasts forever the way two independently-parked
+          // ones could.
+          if (car.turn || other.turn) {
+            const ddx = other.mesh.position.x - car.mesh.position.x;
+            const ddz = other.mesh.position.z - car.mesh.position.z;
+            if (Math.hypot(ddx, ddz) < 2.6) { blocked = true; break; }
+          }
           if (this._isAheadAndClose(car, other.mesh.position, 2.2, 7)) { blocked = true; break; }
         }
       }
@@ -427,6 +505,20 @@ export class TrafficSystem {
         if (!trafficLights.isGreenForAxis(axis)) blocked = true;
       }
 
+      // Anti-gridlock safety net: if a car has sat essentially stationary
+      // AND "blocked" for an implausibly long stretch — longer than one full
+      // red-light cycle could ever legitimately hold it (see PHASES in
+      // trafficLights.js: worst case is well under 12s) — something has
+      // wedged it (a scripted-AI edge case neither of the checks above
+      // anticipated, not a real, currently-relevant obstruction), and it
+      // should ease back onto the road rather than sit there forever.
+      if (blocked && Math.abs(car.speed) < 0.1 && car.stunTime <= 0 && !car.yieldWait) {
+        car.zeroSpeedTime = (car.zeroSpeedTime || 0) + dt;
+        if (car.zeroSpeedTime > 14) blocked = false;
+      } else {
+        car.zeroSpeedTime = 0;
+      }
+
       const cruiseTarget = car.turn ? car.turnSpeed : car.targetSpeed;
       car.targetSpeed = blocked ? 0 : cruiseTarget;
       car.speed += ((blocked ? 0 : Math.max(car.speed, 3)) - car.speed) * Math.min(1, dt * 2.2);
@@ -446,24 +538,81 @@ export class TrafficSystem {
         car.t += (car.speed * dt) / segLen;
 
         if (car.t >= 1) {
-          car.t -= 1;
-          car.ix += car.dx;
-          car.iz += car.dz;
-          const dirs = this._validDirs(car.ix, car.iz, car.dx);
-          // Heavily favor continuing straight so traffic reads as cars
-          // going somewhere, not randomly zig-zagging at every corner.
-          const straight = dirs.find((d) => d.dx === car.dx && d.dz === car.dz);
-          const pick = straight && rand(0, 1) < 0.72 ? straight : choice(dirs.length ? dirs : this._validDirs(car.ix, car.iz, null));
-          if (pick.dx === car.dx && pick.dz === car.dz) {
-            car.targetSpeed = rand(4.5, 8);
-            this._placeCar(car);
+          const nix = car.ix + car.dx, niz = car.iz + car.dz;
+          // Decide (or keep re-using a still-pending) direction for this
+          // corner BEFORE actually committing to it. Round 8 ("ездили по
+          // правилам"): an unprotected left turn has to give way to a car
+          // still coming the other way down the same street — the single
+          // rule the old code never modeled at all, and (together with the
+          // omnidirectional check above) the other big source of "constant
+          // crashes" once there's enough traffic for that to come up often.
+          // The pick is cached on the car (not re-rolled every frame it's
+          // stuck waiting) so a car doesn't flicker between different
+          // random directions while yielding — same real driver, same
+          // intention, just waiting for a gap.
+          let pick = car.pendingPick;
+          if (!pick) {
+            const dirs = this._validDirs(nix, niz, car.dx);
+            // Heavily favor continuing straight so traffic reads as cars
+            // going somewhere, not randomly zig-zagging at every corner.
+            const straight = dirs.find((d) => d.dx === car.dx && d.dz === car.dz);
+            pick = straight && rand(0, 1) < 0.72 ? straight : choice(dirs.length ? dirs : this._validDirs(nix, niz, null));
+            car.pendingPick = pick;
+          }
+
+          const isLeftTurn = car.dx * pick.dz - car.dz * pick.dx > 0.5;
+          const oncomingClose = isLeftTurn && this.cars.some((other) => (
+            other !== car && !other.turn &&
+            other.dx === -car.dx && other.dz === -car.dz &&
+            other.ix + other.dx === nix && other.iz + other.dz === niz &&
+            other.t > 0.35
+          ));
+
+          if (oncomingClose) {
+            // Hold right at the corner — a real driver doesn't turn left
+            // across oncoming traffic just because the light happens to be
+            // green for both directions at once.
+            car.t = 0.999;
+            car.yieldWait = true;
           } else {
-            this._beginTurn(car, pick);
-            this._placeCarOnArc(car);
+            car.yieldWait = false;
+            car.pendingPick = null;
+            car.t -= 1;
+            car.ix = nix;
+            car.iz = niz;
+            if (pick.dx === car.dx && pick.dz === car.dz) {
+              car.targetSpeed = rand(4.5, 8);
+              this._placeCar(car);
+            } else {
+              this._beginTurn(car, pick);
+              this._placeCarOnArc(car);
+            }
           }
         } else {
           this._placeCar(car);
         }
+      }
+
+      // Round 8 ("во время поворота передние колеса поворачивались"): a
+      // visual-only front-wheel steering angle, derived from how fast the
+      // car's own heading actually changed this frame rather than from any
+      // separate "am I turning" flag — that keeps it perfectly in sync with
+      // the curved arc's own smoothly-changing tangent (see
+      // _placeCarOnArc()) during a turn, and naturally relaxes back to
+      // dead-ahead the instant the car is driving straight again, with no
+      // special-casing needed for either state.
+      let dyaw = car.mesh.rotation.y - car.lastYaw;
+      if (dyaw > Math.PI) dyaw -= Math.PI * 2;
+      else if (dyaw < -Math.PI) dyaw += Math.PI * 2;
+      car.lastYaw = car.mesh.rotation.y;
+      const yawRate = dyaw / Math.max(dt, 1 / 240);
+      const wheelBase = car.dims.l * 0.58;
+      const speedForSteer = Math.max(Math.abs(car.speed), 1.5);
+      const rawSteer = Math.max(-MAX_STEER_VISUAL, Math.min(MAX_STEER_VISUAL, Math.atan2(yawRate * wheelBase, speedForSteer)));
+      car.steerAngle += (rawSteer - car.steerAngle) * Math.min(1, dt * 10);
+      if (car.frontWheels) {
+        car.frontWheels[0].rotation.y = car.steerAngle;
+        car.frontWheels[1].rotation.y = car.steerAngle;
       }
 
       // Kinematic bodies aren't pushed by cannon-es, but they DO need a
