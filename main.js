@@ -1388,23 +1388,50 @@ minimapWrapEl.style.display = settings.minimap ? 'block' : 'none';
 document.getElementById('startBtn').addEventListener('click', () => {
   myName = document.getElementById('nameHint').value.trim().slice(0, 16);
   document.getElementById('startOverlay').style.display = 'none';
-  document.getElementById('hud').style.display = 'block';
-  renderer.domElement.style.display = 'block';
-  audio.resume(); // user gesture — required before Web Audio can produce sound
-  net.setName(myName);
-  net.setCar(selectedCarId);
-  net.setVersion(GAME_VERSION);
-  net.connect();
-  // The car built during boot used whatever model was saved from last time;
-  // rebuild it now against whatever the player actually picked just above.
-  settings.carModel = selectedCarId;
-  saveSettings(settings);
-  car.dispose(scene);
-  car = buildVehicleAt(spawn, selectedCarId);
-  car.setHeadlightsOn(headlightsOn);
-  applyAdminStateToCar();
-  lastTime = performance.now();
-  requestAnimationFrame(loop);
+  // Round 7 ("зависает на 10 сек без индикатора"): the click used to go
+  // straight into a real, unavoidable hitch — rebuilding the vehicle and,
+  // above all, the browser's FIRST-EVER shader compile + texture upload for
+  // every material in the whole city (WebGL only ever does that lazily, on
+  // first use) — with nothing on screen the whole time, which reads as a
+  // crash rather than "still loading". Show the loading screen FIRST.
+  const carLoadingEl = document.getElementById('carLoading');
+  carLoadingEl.style.display = 'flex';
+
+  // A nested double rAF forces the browser to actually PAINT that overlay
+  // before any of the heavy synchronous work below runs — without this the
+  // display:flex above and the blocking work below would just get batched
+  // into the same frame and the loading screen would never actually appear
+  // (the freeze would look identical to before, just with an invisible div
+  // technically already "shown").
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    audio.resume(); // user gesture — required before Web Audio can produce sound
+    net.setName(myName);
+    net.setCar(selectedCarId);
+    net.setVersion(GAME_VERSION);
+    net.connect();
+    // The car built during boot used whatever model was saved from last
+    // time; rebuild it now against whatever the player actually picked
+    // just above.
+    settings.carModel = selectedCarId;
+    saveSettings(settings);
+    car.dispose(scene);
+    car = buildVehicleAt(spawn, selectedCarId);
+    car.setHeadlightsOn(headlightsOn);
+    applyAdminStateToCar();
+    // Pre-compile every material/shader in the scene right here, still
+    // under the loading screen — this is what actually eats the several
+    // seconds (hundreds of unique building facade materials, each compiled
+    // once on first use). Doing it explicitly, in one place, means the
+    // very first frame of real gameplay right after is already fast
+    // instead of hitching on whatever happened to be the first thing drawn.
+    renderer.compile(scene, camera);
+
+    carLoadingEl.style.display = 'none';
+    document.getElementById('hud').style.display = 'block';
+    renderer.domElement.style.display = 'block';
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }));
 });
 
 // ---------------------------------------------------------------------------

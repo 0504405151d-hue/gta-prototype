@@ -52,6 +52,21 @@
   #boot .bar { width: 260px; height: 6px; border-radius: 4px; background: #1a2038; overflow: hidden; }
   #boot .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#3b82f6,#22d3ee); transition: width .2s ease; }
 
+  /* Round 7 ("зависает на 10 сек без индикатора" — clicking "Сесть за руль"
+     triggers a real, unavoidable one-time hitch: rebuilding the vehicle and,
+     above all, the browser's FIRST-EVER shader compile + texture upload for
+     every material in the whole city, which WebGL only ever does lazily on
+     first use. That used to happen with nothing on screen, reading as a
+     crash — this overlay covers exactly that window instead. Same visual
+     language as #boot on purpose (same background/colors), just a spinner
+     instead of a determinate bar since there's no clean percentage to show
+     for "the GPU is compiling shaders". */
+  #carLoading { position: fixed; inset: 0; background: #05070d; color: #cfd8ff; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 18px; z-index: 21; font-size: 15px; }
+  #carLoading .spinner { width: 52px; height: 52px; border-radius: 50%; border: 5px solid #1a2038; border-top-color: #22d3ee; border-right-color: #3b82f6; animation: carLoadingSpin .85s linear infinite; }
+  #carLoading .carLoadingLabel { opacity: .9; letter-spacing: .02em; }
+  #carLoading .carLoadingHint { font-size: 12px; opacity: .5; max-width: 280px; text-align: center; }
+  @keyframes carLoadingSpin { to { transform: rotate(360deg); } }
+
   #startOverlay { position: fixed; inset: 0; background: rgba(3,5,10,.72); z-index: 15; display: flex; align-items: center; justify-content: center; }
   #startOverlay .card { background: #0c1120; border: 1px solid #232b45; padding: 28px 34px; border-radius: 16px; max-width: 420px; color: #dfe6ff; text-align: center; }
   #startOverlay h1 { font-size: 20px; margin: 0 0 10px; }
@@ -182,6 +197,12 @@
     <input id="nameHint" placeholder="Ник (необязательно)" maxlength="16" />
     <button id="startBtn">Сесть за руль</button>
   </div>
+</div>
+
+<div id="carLoading">
+  <div class="spinner"></div>
+  <div class="carLoadingLabel">Заводим двигатель…</div>
+  <div class="carLoadingHint">Первая загрузка города в GPU — несколько секунд, дальше так не будет</div>
 </div>
 
 <div id="hud" style="display:none">
