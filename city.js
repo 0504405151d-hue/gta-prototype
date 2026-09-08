@@ -462,6 +462,14 @@ function addTree(THREE, CANNON, world, group, x, z) {
   // broken). A thin static cylinder, same radius as the trunk mesh.
   const trunkBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(trunkR, trunkR, trunkH, 8) });
   trunkBody.position.set(x, trunkH / 2, z);
+  // Follow-up fix ("после столкновения с деревом машина не взрывается"): this
+  // body was solid (cars correctly stopped on it) but had no userData at
+  // all, and vehicle.js's _onChassisCollide only dents/damages the car when
+  // the other body's userData says isBuilding or isTraffic — so hitting a
+  // tree trunk, however hard, silently did zero damage. Tagging it the same
+  // way the parked-car body below already does ("solid + dents the player's
+  // car like any other structure") makes trees actually dangerous to ram.
+  trunkBody.userData = { isBuilding: true };
   world.addBody(trunkBody);
 }
 
@@ -645,6 +653,10 @@ function addStreetlight(THREE, CANNON, world, group, x, z, armAngleRad = 0) {
   // of the pole just being a visual prop cars drive straight through.
   const poleBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(0.13, 0.13, 6, 8) });
   poleBody.position.set(x, 3, z);
+  // Same fix as the tree trunk above: solid but untagged means zero damage
+  // on impact, whatever the speed — tag it isBuilding so a lamp post is a
+  // real hazard to ram, not just an invisible wall.
+  poleBody.userData = { isBuilding: true };
   world.addBody(poleBody);
 
   // The arm/lamp/light used to be built straight along world +X, which was

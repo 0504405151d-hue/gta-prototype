@@ -46,7 +46,7 @@ const LENS_COLORS = {
 const LENS_ORDER = ['red', 'yellow', 'green']; // top to bottom, like a real signal head
 
 export class TrafficLightSystem {
-  constructor(THREE, group, streetCoords, { offset = 6.4, poleHeight = 3.3, armLen = 0.8 } = {}) {
+  constructor(THREE, CANNON, world, group, streetCoords, { offset = 6.4, poleHeight = 3.3, armLen = 0.8 } = {}) {
     this._phaseIdx = 0;
     this._phaseElapsed = 0;
     // Start mid-cycle-ish (NS green, EW red) so the very first frame already
@@ -81,6 +81,17 @@ export class TrafficLightSystem {
       const poleGeo = new THREE.CylinderGeometry(0.07, 0.09, poleHeight, 8);
       poleGeo.translate(px, poleHeight / 2, pz);
       structureGeos.push(poleGeo);
+
+      // Follow-up fix ("и еще нету колидеров у светофоров"): city.js already
+      // gives its streetlights a real static collider so cars don't drive
+      // straight through the post — the traffic-light pole never got the
+      // same treatment. Same recipe (thin static CANNON.Cylinder centered on
+      // the pole), tagged isBuilding so ramming one is dangerous too, same
+      // as any other solid street furniture.
+      const poleBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(0.09, 0.09, poleHeight, 8) });
+      poleBody.position.set(px, poleHeight / 2, pz);
+      poleBody.userData = { isBuilding: true };
+      world.addBody(poleBody);
 
       const dirX = Math.cos(angle), dirZ = Math.sin(angle);
       const bendY = poleHeight;
@@ -118,13 +129,26 @@ export class TrafficLightSystem {
       });
     };
 
+    // Follow-up fix ("ну на обочине а не посепедине перекрестка" pt.2 — the
+    // first curb-offset pass only pushed the pole out along ONE axis, e.g.
+    // the ns-fixture moved to x+offset but kept z exactly on the EW road's
+    // own centerline, so it ended up standing dead center in the middle of
+    // the OTHER street instead of on a sidewalk corner. It also explains the
+    // "NPCs run red and stop on green" report: from a car's point of view,
+    // the pole planted in ITS path was actually showing the OTHER axis'
+    // state, making it look like the wrong light. Fix: offset BOTH x and z
+    // (like city.js's own streetlight corners already do), so each fixture
+    // clears BOTH roads and sits on an actual block corner — and put ns/ew
+    // on two different corners of the same intersection so they don't share
+    // a spot.
     for (const x of streetCoords) {
       for (const z of streetCoords) {
-        // NS fixture plants off to +X of the intersection, arm swings back
-        // toward -X so the head hangs out over the crossing it controls.
-        buildFixture('ns', x + offset, z, Math.PI);
-        // EW fixture plants off to +Z, arm swings back toward -Z.
-        buildFixture('ew', x, z + offset, -Math.PI / 2);
+        // NS fixture: NE-ish corner, arm swings back toward -X to hang the
+        // head out over the NS road (the one running along z at this x).
+        buildFixture('ns', x + offset, z + offset, Math.PI);
+        // EW fixture: NW-ish corner, arm swings back toward -Z to hang the
+        // head out over the EW road (the one running along x at this z).
+        buildFixture('ew', x - offset, z + offset, -Math.PI / 2);
       }
     }
 

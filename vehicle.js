@@ -25,6 +25,11 @@ const DENT_SPEED_THRESHOLD = 2.0;
 // NOTHING ever fully destroyed the car. ~16 m/s is a real, achievable "hit
 // a wall at speed" crash, not a contrived edge case.
 const DAMAGE_PER_HIT_SPEED_DIVISOR = 16;
+// Follow-up ("дом/дерево не взрывается, а другая машина — взрывается"):
+// static structures don't absorb any of the impact themselves, so make
+// them destroy the car at a lower speed than a (relatively) yielding car-vs
+// -car hit needs — ~11 m/s (~40 km/h) instead of ~16 m/s (~58 km/h).
+const DAMAGE_PER_HIT_SPEED_DIVISOR_STATIC = 11;
 // Once either end reaches this much damage the car is totalled — see
 // _explode(). 1.0 (not slightly under) so a single max-damage hit destroys
 // the car in one shot, matching "10x lethal" rather than needing a second
@@ -146,19 +151,28 @@ export class Vehicle {
     // Values below were verified in a standalone headless cannon-es
     // simulation (straight-line + steering-under-load tests) to give a
     // stable, non-flipping ride at speed rather than guessed blind.
+    // Follow-up fix ("сделай мягче подвеску машинн"): lower stiffness + more
+    // suspension travel for a softer, more cushioned ride — damping scaled
+    // down to roughly match the same damping RATIO as before (damping ÷
+    // sqrt(stiffness) held ~constant) rather than just copied over, so the
+    // ride is softer without turning bouncy/oscillating. Re-checked in the
+    // same kind of standalone headless cannon-es test the original values
+    // were validated with (straight-line + steering-under-load) — still
+    // stable, no flipping, just noticeably more body roll/dive under
+    // braking and squat under acceleration.
     const wheelOptions = {
       radius: WHEEL_RADIUS,
       directionLocal: new CANNON.Vec3(0, -1, 0),
-      suspensionStiffness: 28,
-      suspensionRestLength: 0.36,
+      suspensionStiffness: 19,
+      suspensionRestLength: 0.42,
       frictionSlip: 3.2,
-      dampingRelaxation: 3.2,
-      dampingCompression: 4.3,
+      dampingRelaxation: 2.6,
+      dampingCompression: 3.5,
       maxSuspensionForce: 100000,
       rollInfluence: 0.01,
       axleLocal: new CANNON.Vec3(1, 0, 0),
       chassisConnectionPointLocal: new CANNON.Vec3(),
-      maxSuspensionTravel: 0.28,
+      maxSuspensionTravel: 0.36,
       customSlidingRotationalSpeed: -32,
       useCustomSlidingRotationalSpeed: true,
     };
@@ -1055,9 +1069,11 @@ export class Vehicle {
   // -------------------------------------------------------------------
   _onChassisCollide(e) {
     const other = e.body;
-    // Solid structures AND AI traffic dent the car — a moving car should
-    // feel just as real a thing to hit as a wall does.
-    if (!other.userData || !(other.userData.isBuilding || other.userData.isTraffic)) return;
+    // Solid structures, AI traffic AND other connected players' cars all
+    // dent the car — a moving car should feel just as real a thing to hit
+    // as a wall does, whether it's a scripted NPC or someone else's real
+    // car (see RemoteCar's kinematic collider in this file).
+    if (!other.userData || !(other.userData.isBuilding || other.userData.isTraffic || other.userData.isRemoteVehicle)) return;
     if (this.godMode) return; // admin "god mode" — physics collision still happens, just no cosmetic dent/damage
     if (this.destroyed) return; // already a wreck — no more damage/effects to pile on until respawn
     const contact = e.contact;
@@ -1079,7 +1095,16 @@ export class Vehicle {
     // instead of needing several before it looked properly wrecked.
     const localPoint = new this.CANNON.Vec3();
     this.chassisBody.pointToLocalFrame(worldPoint, localPoint);
-    const dmgInc = Math.min(1, impactSpeed / DAMAGE_PER_HIT_SPEED_DIVISOR);
+    // Follow-up fix ("после столкновения с домом или деревом машина не
+    // взрывается, а после столкновения с другой машиной — взрывается"): a
+    // static structure (building/tree/lamp post) doesn't yield at all on
+    // impact, unlike another car, so in reality it's the MORE dangerous
+    // thing to hit at the same speed, not the less dangerous one — use a
+    // lower divisor (reaches full damage at a noticeably lower speed) for
+    // isBuilding hits specifically, on top of the tree/pole userData bug
+    // fixed in city.js/trafficLights.js that made them do zero damage at all.
+    const divisor = other.userData.isBuilding ? DAMAGE_PER_HIT_SPEED_DIVISOR_STATIC : DAMAGE_PER_HIT_SPEED_DIVISOR;
+    const dmgInc = Math.min(1, impactSpeed / divisor);
     if (localPoint.z >= 0) this.frontDamage = Math.min(1, this.frontDamage + dmgInc);
     else this.rearDamage = Math.min(1, this.rearDamage + dmgInc);
     this._applyCrumple();
@@ -1210,9 +1235,24 @@ export class Vehicle {
 const INTERP_DELAY_MS = 100;
 const BUFFER_MAX_AGE_MS = 1000;
 
+// Follow-up fix ("я могу проезжать сквозь некоторые машини" — could drive
+// straight through other connected players' cars): RemoteCar used to be
+// pure visual with no physics body, unlike traffic.js's AI cars (which
+// always had a real kinematic CANNON.Body). Rough collision-box dims per
+// body style, matched to the visual silhouette each _buildRemote*() method
+// above draws — doesn't need to be pixel-perfect, just close enough that
+// the box a player rams into looks like the car they're looking at.
+const REMOTE_CAR_DIMS = {
+  sedan: { w: 1.9, h: 1.1, l: 4.2 },
+  truck: { w: 2.15, h: 1.7, l: 5.6 },
+  bus: { w: 2.3, h: 2.6, l: 8.5 },
+};
+
 export class RemoteCar {
-  constructor(THREE, scene, color = 0x999999, bodyStyle = 'sedan') {
+  constructor(THREE, CANNON, world, scene, color = 0x999999, bodyStyle = 'sedan') {
     this.THREE = THREE;
+    this.CANNON = CANNON;
+    this.world = world;
     const group = new THREE.Group();
     if (bodyStyle === 'truck') {
       this._buildRemoteTruck(group, color);
@@ -1330,6 +1370,23 @@ export class RemoteCar {
 
     this.buffer = []; // { t: local receive time (ms), p:[x,y,z], q:[x,y,z,w] }
     this._initialized = false;
+    this._lastBodyPos = new THREE.Vector3();
+
+    // Real collider so the local player's own car can't drive through this
+    // one — a KINEMATIC body (not dynamic: this car's actual physics runs
+    // on ITS OWN player's client; we only ever receive its transform over
+    // the network) positioned/oriented directly from that transform every
+    // frame in update()/_setLerped() below, exactly the same pattern
+    // traffic.js's AI cars already use for the same reason.
+    if (CANNON && world) {
+      const dims = REMOTE_CAR_DIMS[bodyStyle] || REMOTE_CAR_DIMS.sedan;
+      this.dims = dims;
+      const shape = new CANNON.Box(new CANNON.Vec3(dims.w / 2, dims.h / 2, dims.l / 2));
+      const body = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, shape });
+      body.userData = { isRemoteVehicle: true };
+      world.addBody(body);
+      this.body = body;
+    }
   }
 
   /**
@@ -1496,6 +1553,8 @@ export class RemoteCar {
       this.group.position.set(last.p[0], last.p[1], last.p[2]);
       this.group.quaternion.set(last.q[0], last.q[1], last.q[2], last.q[3]);
       this._initialized = true;
+      this._lastBodyPos.copy(this.group.position);
+      this._syncBody(dt);
       return;
     }
 
@@ -1506,6 +1565,7 @@ export class RemoteCar {
       const s = buf[0];
       this.group.position.set(s.p[0], s.p[1], s.p[2]);
       this.group.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
+      this._syncBody(dt);
       return;
     }
 
@@ -1529,17 +1589,17 @@ export class RemoteCar {
         b = buf[buf.length - 1];
         const span = Math.max(1, b.t - a.t);
         const frac = Math.min(2, (renderTime - a.t) / span); // cap extrapolation to 2x the last interval
-        this._setLerped(a, b, frac);
+        this._setLerped(a, b, frac, dt);
         return;
       }
     }
 
     const span = Math.max(1, b.t - a.t);
     const frac = Math.min(1, Math.max(0, (renderTime - a.t) / span));
-    this._setLerped(a, b, frac);
+    this._setLerped(a, b, frac, dt);
   }
 
-  _setLerped(a, b, frac) {
+  _setLerped(a, b, frac, dt) {
     const g = this.group;
     g.position.set(
       a.p[0] + (b.p[0] - a.p[0]) * frac,
@@ -1550,9 +1610,31 @@ export class RemoteCar {
     const qb = new this.THREE.Quaternion(b.q[0], b.q[1], b.q[2], b.q[3]);
     qa.slerp(qb, frac);
     g.quaternion.copy(qa);
+    this._syncBody(dt);
   }
 
-  dispose(scene) {
+  // Keeps this remote car's kinematic collider glued to the visual mesh
+  // every frame (see the constructor's comment on why it's kinematic, not
+  // dynamic) — with a real velocity derived from the position delta so a
+  // player's dynamic chassis gets a correct physical impulse on impact
+  // instead of hitting something the engine thinks is standing still,
+  // exactly the same trick traffic.js's AI cars already use.
+  _syncBody(dt) {
+    if (!this.body) return;
+    const g = this.group;
+    this.body.position.set(g.position.x, g.position.y, g.position.z);
+    this.body.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
+    const d = Math.max(dt || 0, 1 / 240);
+    this.body.velocity.set(
+      (g.position.x - this._lastBodyPos.x) / d,
+      (g.position.y - this._lastBodyPos.y) / d,
+      (g.position.z - this._lastBodyPos.z) / d
+    );
+    this._lastBodyPos.copy(g.position);
+  }
+
+  dispose(scene, world) {
     scene.remove(this.group);
+    if (this.body && world) world.removeBody(this.body);
   }
 }

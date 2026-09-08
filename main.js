@@ -209,7 +209,12 @@ const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords
 // so the post stands on the sidewalk corner and only the signal head's arm
 // reaches out toward the road, instead of the whole fixture standing in
 // the middle of the crossing.
-const trafficLights = new TrafficLightSystem(THREE, city.group, city.streetCoords, {
+// Second follow-up to the same complaint ("на обочине, а не посередине") —
+// the pass above only offset ONE axis, so the pole cleared its own road but
+// stood dead center in the middle of the OTHER road; see trafficLights.js's
+// build loop for the real diagonal-corner fix. Also now takes CANNON/world
+// so each pole gets a real collider (it had none before).
+const trafficLights = new TrafficLightSystem(THREE, CANNON, world, city.group, city.streetCoords, {
   offset: ROAD_HALF_WIDTH + 0.9,
 });
 
@@ -1134,7 +1139,7 @@ const net = new Network({
   onLeave(msg) {
     const rc = remoteCars.get(msg.id);
     if (rc) {
-      rc.dispose(scene);
+      rc.dispose(scene, world);
       remoteCars.delete(msg.id);
     }
     playerNames.delete(msg.id);
@@ -1241,8 +1246,8 @@ const net = new Network({
     const preset = CAR_PRESETS[msg.carId] || CAR_PRESETS.sedan;
     if (rc.bodyStyle === preset.bodyStyle) return; // e.g. sedan -> sport: same generic body, nothing to rebuild
     const { buffer, color } = rc;
-    rc.dispose(scene);
-    const newRc = new RemoteCar(THREE, scene, color, preset.bodyStyle);
+    rc.dispose(scene, world);
+    const newRc = new RemoteCar(THREE, CANNON, world, scene, color, preset.bodyStyle);
     newRc.buffer = buffer;
     remoteCars.set(msg.id, newRc);
   },
@@ -1277,7 +1282,14 @@ const net = new Network({
 function spawnRemote(id, color, carId, state) {
   if (remoteCars.has(id)) return;
   const preset = CAR_PRESETS[carId] || CAR_PRESETS.sedan;
-  const rc = new RemoteCar(THREE, scene, color, preset.bodyStyle);
+  // Follow-up fix ("я могу проезжать сквозь некоторые машини" — other
+  // connected players' cars): RemoteCar used to be pure visual, no physics
+  // body at all, so the local player's own car always passed straight
+  // through every other real player (AI traffic cars, which DO have a
+  // kinematic body, were never affected — hence "some" cars, not all). Now
+  // takes CANNON/world to give it a real kinematic collider — see
+  // RemoteCar's constructor in vehicle.js.
+  const rc = new RemoteCar(THREE, CANNON, world, scene, color, preset.bodyStyle);
   if (state) rc.setTarget(state);
   remoteCars.set(id, rc);
 }
@@ -1425,6 +1437,22 @@ document.getElementById('startBtn').addEventListener('click', () => {
     // very first frame of real gameplay right after is already fast
     // instead of hitching on whatever happened to be the first thing drawn.
     renderer.compile(scene, camera);
+    // Follow-up fix ("спинер крутится секунду, а потом чёрный экран с худом
+    // ~9 сек"): compile() above only warms up the main color-pass shaders.
+    // It does NOT touch two other big one-time costs that were still
+    // happening later: the shadow-map depth-pass shaders (a separate
+    // program variant per shadow-casting material, only ever compiled
+    // inside the shadow render pass) and the post-processing pipeline's own
+    // shaders (bloom + output pass live on `composer`, not on `scene`, so
+    // compile() never sees them at all). Both used to get lazily compiled
+    // on the very first real composer.render() call in loop() — AFTER the
+    // loading screen had already hidden itself and the HUD/canvas were
+    // already showing, which is exactly the "spinner gone, then a long
+    // black-screen freeze" the report described. Doing one full real
+    // render right here, while the canvas is still display:none (WebGL
+    // still does the GPU work even though nothing is on screen to see it),
+    // forces all of that same lazy cost to happen under the spinner instead.
+    composer.render();
 
     carLoadingEl.style.display = 'none';
     document.getElementById('hud').style.display = 'block';
