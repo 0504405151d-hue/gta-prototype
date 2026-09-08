@@ -8,6 +8,7 @@
 // own tire slip model) that main.js uses to trigger skid marks/dust/sound.
 
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { SUSPENSION_PRESETS } from './settings.js';
 
 export const WHEEL_RADIUS = 0.36;
 
@@ -118,6 +119,10 @@ export class Vehicle {
     // for the sport/suv presets); 'truck' and 'bus' branch to genuinely
     // different silhouettes built further down (_buildTruckBody/_buildBusBody).
     bodyStyle = 'sedan',
+    // In-game suspension-softness picker ("сделай возможность прямо в игре
+    // мягкость подвески выбрать") — a key into SUSPENSION_PRESETS
+    // (settings.js); falls back to 'standard' for anything unrecognized.
+    suspension = 'standard',
   } = {}) {
     this.THREE = THREE;
     this.CANNON = CANNON;
@@ -150,29 +155,25 @@ export class Vehicle {
 
     // Values below were verified in a standalone headless cannon-es
     // simulation (straight-line + steering-under-load tests) to give a
-    // stable, non-flipping ride at speed rather than guessed blind.
-    // Follow-up fix ("сделай мягче подвеску машинн"): lower stiffness + more
-    // suspension travel for a softer, more cushioned ride — damping scaled
-    // down to roughly match the same damping RATIO as before (damping ÷
-    // sqrt(stiffness) held ~constant) rather than just copied over, so the
-    // ride is softer without turning bouncy/oscillating. Re-checked in the
-    // same kind of standalone headless cannon-es test the original values
-    // were validated with (straight-line + steering-under-load) — still
-    // stable, no flipping, just noticeably more body roll/dive under
-    // braking and squat under acceleration.
+    // stable, non-flipping ride at speed rather than guessed blind — all
+    // three SUSPENSION_PRESETS entries (settings.js) were checked the same
+    // way, damping scaled to roughly hold the same damping RATIO across
+    // presets (damping ÷ sqrt(stiffness) ~constant) so a softer preset
+    // doesn't also turn bouncy/oscillating.
+    const preset = SUSPENSION_PRESETS[suspension] || SUSPENSION_PRESETS.standard;
     const wheelOptions = {
       radius: WHEEL_RADIUS,
       directionLocal: new CANNON.Vec3(0, -1, 0),
-      suspensionStiffness: 19,
-      suspensionRestLength: 0.42,
+      suspensionStiffness: preset.suspensionStiffness,
+      suspensionRestLength: preset.suspensionRestLength,
       frictionSlip: 3.2,
-      dampingRelaxation: 2.6,
-      dampingCompression: 3.5,
+      dampingRelaxation: preset.dampingRelaxation,
+      dampingCompression: preset.dampingCompression,
       maxSuspensionForce: 100000,
       rollInfluence: 0.01,
       axleLocal: new CANNON.Vec3(1, 0, 0),
       chassisConnectionPointLocal: new CANNON.Vec3(),
-      maxSuspensionTravel: 0.36,
+      maxSuspensionTravel: preset.maxSuspensionTravel,
       customSlidingRotationalSpeed: -32,
       useCustomSlidingRotationalSpeed: true,
     };
@@ -194,6 +195,7 @@ export class Vehicle {
     });
     vehicle.addToWorld(world);
     this.vehicle = vehicle;
+    this.suspension = SUSPENSION_PRESETS[suspension] ? suspension : 'standard';
 
     // ---------- Visual mesh ----------
     const group = new THREE.Group();
@@ -1224,6 +1226,28 @@ export class Vehicle {
     this._headlightsOn = on;
     this.headBeam.visible = on;
     this._refreshHeadlightGlow();
+  }
+
+  /**
+   * In-game suspension-softness picker ("сделай возможность прямо в игре
+   * мягкость подвески выбрать"). Unlike carModel (baked into the chassis
+   * shape/mesh at construction, so switching it means a full rebuild),
+   * cannon-es's RaycastVehicle reads each wheel's suspension numbers fresh
+   * off its live WheelInfo object every physics step — so this can just
+   * mutate those in place and the new feel applies on the very next frame,
+   * no respawn/rebuild needed.
+   */
+  setSuspension(key) {
+    const preset = SUSPENSION_PRESETS[key];
+    if (!preset) return;
+    this.suspension = key;
+    for (const wheel of this.vehicle.wheelInfos) {
+      wheel.suspensionStiffness = preset.suspensionStiffness;
+      wheel.suspensionRestLength = preset.suspensionRestLength;
+      wheel.dampingRelaxation = preset.dampingRelaxation;
+      wheel.dampingCompression = preset.dampingCompression;
+      wheel.maxSuspensionTravel = preset.maxSuspensionTravel;
+    }
   }
 }
 

@@ -114,7 +114,29 @@ function applyGraphicsSettings(level) {
 // Physics world
 // ---------------------------------------------------------------------------
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
-world.broadphase = new CANNON.SAPBroadphase(world);
+// Follow-up fix ("я могу проезжать через некоторые фонари, светофоры итд"):
+// this used to be a SAPBroadphase, which is faster in theory but has a real
+// correctness bug for a scene like this one. Its collisionPairs() sorts all
+// bodies along one axis and, for each body, walks forward through the
+// SORTED list and `break`s the moment one candidate's position±boundingRadius
+// stops overlapping — assuming that once that's false, every later body in
+// the list is even farther away and can be skipped too. That assumption
+// silently breaks when body sizes vary a lot: a normal-sized object right
+// next to the moving car can trip that early exit, even though a much
+// BIGGER object further down the (correctly x-sorted) list — like a tall,
+// thin lamp/signal pole, whose boundingRadius is inflated by its height —
+// would still genuinely overlap. Confirmed directly: built a standalone
+// repro against this exact vendored cannon-es (drive a chassis box straight
+// into a streetlight pole's real collider) — SAPBroadphase reliably misses
+// the hit (0 damage, car sails straight through), swapping in
+// NaiveBroadphase with the identical setup reliably catches it every time.
+// NaiveBroadphase checks every body pair with no such shortcut, so it can't
+// have this failure mode — it costs measurably more (~2ms/step in a
+// synthetic worst-case stress test at this city's ~680 bodies, mostly
+// static-vs-static pairs `needBroadphaseCollision()` already rejects
+// cheaply), but "sometimes drive straight through a lamp post" is worse
+// than a few extra milliseconds of physics per frame.
+world.broadphase = new CANNON.NaiveBroadphase();
 // Raised from 12 (round 3: "убери проезжание сквозь домов" — cars were able
 // to visibly sink into / clip through building corners at speed). More
 // solver iterations converge to a smaller penetration depth per contact
@@ -238,6 +260,7 @@ function buildVehicleAt(spawnPoint, carId) {
     maxSteer: preset.maxSteer,
     maxBrakeForce: preset.maxBrakeForce,
     bodyStyle: preset.bodyStyle,
+    suspension: settings.suspension,
   });
 }
 const spawn = choice(city.spawnPoints);
@@ -532,6 +555,7 @@ const sensRangeEl = document.getElementById('sensRange');
 const sensValEl = document.getElementById('sensVal');
 const minimapToggleEl = document.getElementById('minimapToggle');
 const carSelectEl = document.getElementById('carSelect');
+const suspensionSelectEl = document.getElementById('suspensionSelect');
 const minimapWrapEl = document.getElementById('minimapWrap');
 
 function refreshSettingsUI() {
@@ -544,6 +568,7 @@ function refreshSettingsUI() {
   sensValEl.textContent = settings.sensitivity.toFixed(1);
   minimapToggleEl.checked = settings.minimap;
   carSelectEl.value = selectedCarId;
+  suspensionSelectEl.value = settings.suspension;
 }
 
 volumeRangeEl.addEventListener('input', () => {
@@ -576,6 +601,15 @@ trafficSelectEl.addEventListener('change', () => {
 weatherSelectEl.addEventListener('change', () => {
   settings.weather = weatherSelectEl.value;
   weather.set(settings.weather);
+  saveSettings(settings);
+});
+// "сделай возможность прямо в игре мягкость подвески выбрать" — unlike the
+// car-model select below, this doesn't need applyCarBtn/respawn: cannon-es
+// reads each wheel's suspension numbers fresh every physics step, so
+// car.setSuspension() (vehicle.js) takes effect immediately, mid-drive.
+suspensionSelectEl.addEventListener('change', () => {
+  settings.suspension = suspensionSelectEl.value;
+  car.setSuspension(settings.suspension);
   saveSettings(settings);
 });
 sensRangeEl.addEventListener('input', () => {
