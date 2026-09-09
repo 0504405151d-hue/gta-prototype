@@ -17,6 +17,15 @@ export const DEFAULT_SETTINGS = {
 
 export const TRAFFIC_COUNTS = { off: 0, low: 8, medium: 16, high: 28 };
 
+// Round 12 ("ближе к GTA Сан Андреас" — пешеходы на тротуарах): reuses the
+// existing traffic-density setting rather than adding a whole new dropdown
+// for this — a busier-traffic city reasonably has busier sidewalks too, and
+// it means pedestrians ship without any settings.js/index.html UI changes.
+// "off" still keeps a light background presence (a city with literally zero
+// people feels dead even with no cars at all), everything above it scales up
+// roughly like TRAFFIC_COUNTS does.
+export const PEDESTRIAN_COUNTS = { off: 8, low: 18, medium: 30, high: 46 };
+
 // Round 9 ("сделай возможность настройки скорости трафика"): a live
 // multiplier on top of every AI car's own cruise/turn speed and personality
 // (see TrafficSystem.setSpeedMultiplier in traffic.js) — read fresh every

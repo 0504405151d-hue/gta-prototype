@@ -93,6 +93,50 @@ export class EffectsSystem {
   }
 
   /**
+   * Round 11 ("улучши графику в 1000 раз" — частицы и эффекты): a small,
+   * short-lived puff behind a car's exhaust tip under load — up to now the
+   * only visible sign a car was accelerating hard was the engine sound and
+   * the skid dust under drift/braking; there was nothing at all coming out
+   * of the actual exhaust pipes. Deliberately much smaller/quieter than
+   * spawnSmoke() above (that one's tuned for "a crate just exploded") —
+   * this needs to read as a continuous light drift behind a moving car, not
+   * another one-shot burst, so it's called every couple of frames rather
+   * than once per event (see main.js's throttle-driven call site).
+   */
+  spawnExhaust(position, backward) {
+    const { THREE } = this;
+    const vel = backward.clone()
+      .multiplyScalar(rand(1.2, 2.2))
+      .add(new THREE.Vector3(rand(-0.3, 0.3), rand(0.3, 0.8), rand(-0.3, 0.3)));
+    this._spawnParticle({
+      position, velocity: vel, size: rand(0.16, 0.3), color: 0xb9b9b9,
+      life: rand(0.4, 0.7), gravity: -0.3, opacity: 0.3,
+    });
+  }
+
+  /**
+   * Round 11 ("улучши графику в 1000 раз" — частицы и эффекты): a quick,
+   * flat-ish splash where a tire meets standing water — the rain preset
+   * (weather.js) already has falling drops and a wet/reflective road
+   * material, but nothing at all happened at actual ground contact, which
+   * is the single most noticeable thing about driving through real rain.
+   * Barely-there and very short-lived by design (a light grey-blue fleck,
+   * gone in a third of a second) — this fires continuously while driving in
+   * rain (see main.js), so anything bigger/longer would quickly turn into a
+   * distracting haze around the car instead of a subtle "yes it's wet" cue.
+   */
+  spawnSplash(position) {
+    const { THREE } = this;
+    for (let i = 0; i < 2; i++) {
+      const vel = new THREE.Vector3(rand(-0.8, 0.8), rand(1.2, 2.4), rand(-0.8, 0.8));
+      this._spawnParticle({
+        position, velocity: vel, size: rand(0.1, 0.2), color: 0xc9d8e0,
+        life: rand(0.15, 0.3), gravity: -12, opacity: 0.5,
+      });
+    }
+  }
+
+  /**
    * Round 7 ("сделай в 10 раз летальнее машини" — real car destruction, not
    * just a dent): the one-shot burst when a car gets totalled (see
    * vehicle.js's _explode()). Deliberately bigger/louder-reading than every

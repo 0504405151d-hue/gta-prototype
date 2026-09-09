@@ -97,6 +97,105 @@ export class AudioSystem {
     this.screechGain = screechGain;
 
     this.ready = true;
+    this._startCityAmbience();
+  }
+
+  /**
+   * Round 12 ("ближе к GTA Сан Андреас" — атмосфера города): up to now the
+   * only sounds in the whole game were things the PLAYER'S OWN car directly
+   * caused (engine/screech/impact) plus the radio — the city itself was
+   * completely silent underneath all of that, which is a big part of why a
+   * GTA-style city reads as "alive" even standing still. Two purely ambient,
+   * fully procedural (no audio files, matching this file's own convention)
+   * layers, both routed through masterGain so mute/volume still cover them:
+   * a constant, very quiet low-passed noise bed standing in for distant
+   * traffic hum, and randomly-timed short one-shots (a distant horn honk,
+   * rarely a distant siren) so the background isn't perfectly static either.
+   * Neither one is tied to anything in the world — no real traffic car
+   * actually "owns" a honk — this is atmosphere, not a simulation of it.
+   */
+  _startCityAmbience() {
+    const ctx = this.ctx;
+    const hum = ctx.createBufferSource();
+    hum.buffer = this.noiseBuffer;
+    hum.loop = true;
+    hum.playbackRate.value = 0.5;
+    const humFilter = ctx.createBiquadFilter();
+    humFilter.type = 'lowpass';
+    humFilter.frequency.value = 220; // dull, distant rumble — nowhere near the engine's own frequency range
+    humFilter.Q.value = 0.4;
+    const humGain = ctx.createGain();
+    humGain.gain.value = 0.02; // barely-there bed, not a competing layer under the engine/radio
+    hum.connect(humFilter).connect(humGain).connect(this.masterGain);
+    hum.start();
+    this._ambienceHumGain = humGain;
+
+    this._scheduleAmbienceEvent();
+  }
+
+  _scheduleAmbienceEvent() {
+    if (!this.ready) return;
+    // 12-35s between events — frequent enough to notice, spaced out enough
+    // that it never reads as a loop.
+    const delay = 12000 + Math.random() * 23000;
+    this._ambienceTimer = setTimeout(() => {
+      if (!this.ready) return;
+      if (Math.random() < 0.15) this._playDistantSiren();
+      else this._playDistantHonk();
+      this._scheduleAmbienceEvent();
+    }, delay);
+  }
+
+  /** A short, quiet two-tone honk, pitched/panned randomly so a run of them
+   * never sounds like the exact same car honking on a loop. */
+  _playDistantHonk() {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const baseFreq = 320 + Math.random() * 140;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.045, now + 0.03);
+    gain.gain.setValueAtTime(0.045, now + 0.22);
+    gain.gain.linearRampToValueAtTime(0, now + 0.32);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1200; // distant — no crisp top end
+    gain.connect(filter).connect(this.masterGain);
+    [baseFreq, baseFreq * 1.2].forEach((f) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.value = f;
+      osc.connect(gain);
+      osc.start(now);
+      osc.stop(now + 0.35);
+    });
+  }
+
+  /** A rare, slow, low-volume siren warble — pure atmosphere, no actual
+   * police/emergency behavior anywhere in the game reacts to it. */
+  _playDistantSiren() {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1400;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.035, now + 0.5);
+    const duration = 3.5 + Math.random() * 2;
+    gain.gain.setValueAtTime(0.035, now + duration - 0.5);
+    gain.gain.linearRampToValueAtTime(0, now + duration);
+    osc.connect(filter).connect(gain).connect(this.masterGain);
+    // Slow warble between two pitches — the classic wail shape, just quiet
+    // and filtered enough to read as blocks away rather than on top of you.
+    const steps = Math.round(duration / 0.9);
+    for (let i = 0; i <= steps; i++) {
+      osc.frequency.setValueAtTime(i % 2 === 0 ? 600 : 850, now + i * 0.9);
+    }
+    osc.start(now);
+    osc.stop(now + duration + 0.1);
   }
 
   /** Call every frame with 0..~60 m/s speed and 0..1 throttle magnitude. */

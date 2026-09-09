@@ -19,18 +19,25 @@ export const WHEEL_RADIUS = 0.36;
 // matter how many times it got hit.
 const DENT_RADIUS = 1.15;
 const DENT_MAX_PUSH = 0.42;
-const DENT_SPEED_THRESHOLD = 2.0;
+// Round 12 ("сделай чтоб машина сложнее ломалась"): round 7 deliberately
+// made crashes "10x more lethal" per an earlier request from the same
+// player — this walks part of that back without fully reverting it. A
+// bump/scrape now has to be a bit more than a graze before it leaves a mark.
+const DENT_SPEED_THRESHOLD = 3.0;
 // A single impact at/above this speed (m/s) maxes out that end's damage in
-// ONE hit — was capped at 0.4 per hit off a /35 divisor before round 7, so
-// even a wall-at-full-speed crash took 3+ hits to visibly wreck an end and
-// NOTHING ever fully destroyed the car. ~16 m/s is a real, achievable "hit
-// a wall at speed" crash, not a contrived edge case.
-const DAMAGE_PER_HIT_SPEED_DIVISOR = 16;
+// ONE hit. Round 7 set this to 16 (a wall-at-full-speed crash totals the car
+// in one hit — "10x lethal" per that round's request). Round 12 ("сложнее
+// ломалась") raises it to 30 — roughly 108 km/h needed to one-shot an end
+// against another car, versus ~58 km/h before — while keeping the same
+// mechanic (a genuinely extreme hit can still total the car outright, it
+// just now takes a genuinely extreme hit rather than an ordinary crash).
+const DAMAGE_PER_HIT_SPEED_DIVISOR = 30;
 // Follow-up ("дом/дерево не взрывается, а другая машина — взрывается"):
 // static structures don't absorb any of the impact themselves, so make
 // them destroy the car at a lower speed than a (relatively) yielding car-vs
-// -car hit needs — ~11 m/s (~40 km/h) instead of ~16 m/s (~58 km/h).
-const DAMAGE_PER_HIT_SPEED_DIVISOR_STATIC = 11;
+// -car hit needs. Raised alongside DAMAGE_PER_HIT_SPEED_DIVISOR above (round
+// 12): ~72 km/h to one-shot an end against a building now, instead of ~40.
+const DAMAGE_PER_HIT_SPEED_DIVISOR_STATIC = 20;
 // Once either end reaches this much damage the car is totalled — see
 // _explode(). 1.0 (not slightly under) so a single max-damage hit destroys
 // the car in one shot, matching "10x lethal" rather than needing a second
@@ -170,7 +177,17 @@ export class Vehicle {
       dampingRelaxation: preset.dampingRelaxation,
       dampingCompression: preset.dampingCompression,
       maxSuspensionForce: 100000,
-      rollInfluence: 0.01,
+      // Round 12 ("ближе к GTA Сан Андреас" — физику реалистичней): was
+      // 0.01 — cannon-es's own docs describe this as "how easy the vehicle
+      // is to roll over" (0 = no lean at all, 1 = tips very easily), and
+      // 0.01 is close enough to 0 that the car stayed almost perfectly flat
+      // through even a hard turn, which read as much more "on rails" than
+      // SA's noticeably weighty lean under cornering. Raised to a modest
+      // 0.05 — enough to actually see/feel body lean in a hard turn without
+      // fighting the existing anti-roll bar (_applyAntiRoll(), ANTI_ROLL_
+      // STIFFNESS above) that's still in place specifically to stop that
+      // lean from ever running away into an actual flip.
+      rollInfluence: 0.05,
       axleLocal: new CANNON.Vec3(1, 0, 0),
       chassisConnectionPointLocal: new CANNON.Vec3(),
       maxSuspensionTravel: preset.maxSuspensionTravel,

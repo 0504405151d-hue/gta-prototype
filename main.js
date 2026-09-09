@@ -5,6 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { buildCity, ROAD_HALF_WIDTH } from './city.js';
@@ -16,8 +17,9 @@ import { RadioSystem } from './radio.js';
 import { Network } from './network.js';
 import { TrafficSystem } from './traffic.js';
 import { TrafficLightSystem } from './trafficLights.js';
+import { PedestrianSystem } from './pedestrians.js';
 import { choice, setAnisotropy } from './utils.js';
-import { loadSettings, saveSettings, TRAFFIC_COUNTS, TRAFFIC_SPEED_MULTIPLIERS } from './settings.js';
+import { loadSettings, saveSettings, TRAFFIC_COUNTS, TRAFFIC_SPEED_MULTIPLIERS, PEDESTRIAN_COUNTS } from './settings.js';
 import { WeatherSystem } from './weather.js';
 import { DayNightCycle } from './dayNightCycle.js';
 import { CAR_PRESETS, CAR_COLORS } from './carPresets.js';
@@ -28,7 +30,7 @@ import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 // people can actually SEE whether they're both on the same deployed build
 // instead of guessing from symptoms like "your car looks different to me".
 // Bump this string whenever a round of changes ships.
-export const GAME_VERSION = 'r7 · 2026-09-06';
+export const GAME_VERSION = 'r9 · 2026-09-08';
 const versionTagEl = document.getElementById('versionTag');
 if (versionTagEl) versionTagEl.textContent = `City Drive ${GAME_VERSION}`;
 
@@ -50,6 +52,12 @@ const SHADOW_SIZES = { low: 512, medium: 1024, high: 2048, ultra: 4096 };
 // shadow map, without a temporal-dead-zone crash from referencing it before
 // its real assignment further down where the composer is built.
 let gtao = null;
+
+// Round 11 ("улучши графику в 1000 раз" — сглаживание/чёткость картинки):
+// same temporal-dead-zone reasoning as `gtao` above — applyGraphicsSettings()
+// runs once at boot before the composer/SMAAPass below exist, so this needs
+// to be declared (and no-op-guarded) up here too.
+let smaa = null;
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
@@ -124,6 +132,24 @@ composer.addPass(gtao);
 // 0.42→0.34 (less spread on whatever does cross it).
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.34, 0.6, 0.99);
 composer.addPass(bloom);
+
+// Round 11 ("улучши графику в 1000 раз" — сглаживание/чёткость картинки):
+// `antialias: true` on the renderer (see its constructor above) only ever
+// covers "low" being the one tier that skips it — every other tier already
+// gets MSAA on the base render, but that only smooths edges of the ORIGINAL
+// scene geometry; it does nothing for the aliasing UnrealBloomPass/GTAOPass
+// above reintroduce into the final composited image (both work on
+// downsampled render targets and upscale back). SMAAPass runs a proper
+// edge-detection + blend pass on the actual final frame, on top of whatever
+// MSAA already did, catching exactly that residual jaggedness. Much cheaper
+// than GTAO (no extra scene traversal, just 2-3 fullscreen passes on the
+// already-rendered image), so it's gated one tier more generously — every
+// tier except "low", which already accepts the roughest image in exchange
+// for the least work.
+smaa = new SMAAPass(innerWidth * renderer.getPixelRatio(), innerHeight * renderer.getPixelRatio());
+smaa.enabled = settings.graphics !== 'low';
+composer.addPass(smaa);
+
 composer.addPass(new OutputPass());
 
 addEventListener('resize', () => {
@@ -131,7 +157,19 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
-  gtao.setSize(innerWidth, innerHeight);
+  // Round 11 fix: EffectComposer.setSize() above already resizes every pass
+  // it owns (GTAOPass/SMAAPass included) to width*pixelRatio — that's how it
+  // keeps a custom pass's own internal render targets matching the actual
+  // device-pixel resolution the rest of the composer works at. The two calls
+  // below used to immediately re-set GTAOPass back to the plain CSS-pixel
+  // size, silently undoing that and leaving its AO buffer downsampled
+  // relative to the real frame on any display with devicePixelRatio > 1 —
+  // never caught before because this sandbox's devicePixelRatio is 1, where
+  // "correct" and "wrong" happen to compute the same number. Multiplying by
+  // the pixel ratio here (same as EffectComposer just did) fixes that for
+  // real hardware without changing anything in this all-1.0 test sandbox.
+  gtao.setSize(innerWidth * renderer.getPixelRatio(), innerHeight * renderer.getPixelRatio());
+  smaa.setSize(innerWidth * renderer.getPixelRatio(), innerHeight * renderer.getPixelRatio());
 });
 
 // Graphics quality setting: pixel ratio cap + shadow map on/off/quality/size
@@ -157,6 +195,7 @@ function applyGraphicsSettings(level) {
   // every frame), so "low"/"medium" skip it entirely rather than paying for
   // it at a resolution/framerate that can't really show it off anyway.
   if (gtao) gtao.enabled = level === 'high' || level === 'ultra';
+  if (smaa) smaa.enabled = level !== 'low';
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +327,14 @@ const traffic = new TrafficSystem(THREE, CANNON, world, scene, city.streetCoords
 // so each pole gets a real collider (it had none before).
 const trafficLights = new TrafficLightSystem(THREE, CANNON, world, city.group, city.streetCoords, {
   offset: ROAD_HALF_WIDTH + 0.9,
+});
+
+setBootProgress(64, 'Расставляем пешеходов…');
+// Round 12 ("ближе к GTA Сан Андреас" — пешеходы на тротуарах): purely
+// decorative sidewalk foot traffic — see pedestrians.js for why this never
+// touches the player's car (no collider, no interaction of any kind).
+const pedestrians = new PedestrianSystem(THREE, scene, city.streetCoords, ROAD_HALF_WIDTH, {
+  count: PEDESTRIAN_COUNTS[settings.traffic] ?? PEDESTRIAN_COUNTS.medium,
 });
 
 setBootProgress(70, 'Настраиваем погоду…');
@@ -654,6 +701,7 @@ graphicsSelectEl.addEventListener('change', () => {
 trafficSelectEl.addEventListener('change', () => {
   settings.traffic = trafficSelectEl.value;
   traffic.setCount(TRAFFIC_COUNTS[settings.traffic] ?? TRAFFIC_COUNTS.medium);
+  pedestrians.setCount(PEDESTRIAN_COUNTS[settings.traffic] ?? PEDESTRIAN_COUNTS.medium);
   saveSettings(settings);
 });
 trafficSpeedSelectEl.addEventListener('change', () => {
@@ -1603,8 +1651,26 @@ const SPEED_GAUGE_MAX_KMH = 180;
 // speed, so marks only appear when the tires are actually sliding.
 // ---------------------------------------------------------------------------
 let skidTick = 0;
-function updateSkidFx(dt, speedKmh) {
+function updateSkidFx(dt, speedKmh, throttle = 0) {
   skidTick++;
+  // Bugfix ("после поломки вылетают какие-то черные квадраты"): once the car
+  // is a wreck, update() above (see vehicle.js) forces handbrake=true/brake=1
+  // on every wheel no matter what — realistic for "the wreck sits there and
+  // doesn't drive off", but it also means every wheel reports heavy slip
+  // (skidInfo near 0, "skidding") for as long as the wreck still has any
+  // velocity along the ground after the crash (sliding to a stop, getting
+  // shoved by traffic, etc.). That fed straight into the skid-mark code
+  // below, which doesn't know or care WHY a wheel is slipping — the result
+  // was a rapid burst of addSkidMark()'s dark translucent quads flooding the
+  // crash site the instant a car got destroyed, which read as exactly the
+  // "black squares" being reported: not a rendering glitch, just tire marks
+  // being laid by a car that should no longer be laying any. A wreck has no
+  // business skidding, kicking up dust, splashing through puddles, or
+  // puffing exhaust, so all of that is skipped outright once destroyed.
+  if (car.destroyed) {
+    audio.updateScreech(0);
+    return;
+  }
   const states = car.getWheelSkidStates();
   let maxSkid = 0;
   for (const w of states) {
@@ -1614,8 +1680,34 @@ function updateSkidFx(dt, speedKmh) {
       effects.addSkidMark(w.position, getCarYaw());
       if (skidTick % 6 === 0) effects.spawnDust({ x: w.position.x, y: w.position.y + 0.1, z: w.position.z }, 1);
     }
+    // Round 11 ("улучши графику в 1000 раз" — частицы и эффекты): a light
+    // splash at each wheel that's actually touching the ground while it's
+    // raining — reuses the exact same per-wheel contact states this
+    // function already reads for skid marks, just gated on weather instead
+    // of slip. Every 4th tick per wheel (not every tick) keeps this from
+    // turning into a constant haze around the car at highway speed.
+    if (weather.current === 'rain' && speedKmh > 5 && skidTick % 4 === 0) {
+      effects.spawnSplash({ x: w.position.x, y: w.position.y + 0.05, z: w.position.z });
+    }
   }
   audio.updateScreech(maxSkid > 0.15 ? maxSkid : 0);
+
+  // Round 11 ("улучши графику в 1000 раз" — частицы и эффекты): a light
+  // exhaust puff under real load — heavy throttle at low-to-moderate speed
+  // (accelerating from a stop, climbing, etc.), not just "pedal pressed" at
+  // any speed, so it reads as "the engine is working" rather than a
+  // constant tail of smoke while cruising. One shared puff position behind
+  // the car (real dual-exhaust spacing is too subtle to read at this
+  // distance/size anyway) computed straight from the car's own transform —
+  // exactly the same forward-vector trick updateCamera() above already uses.
+  if (throttle > 0.5 && speedKmh < 70 && skidTick % 3 === 0) {
+    const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(car.group.quaternion);
+    const backward = forward.clone().negate();
+    const tip = car.group.position.clone()
+      .addScaledVector(forward, -(car.dims.chassisL / 2 + 0.15))
+      .add(new THREE.Vector3(0, 0.2, 0));
+    effects.spawnExhaust(tip, backward);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1799,6 +1891,7 @@ function loop(now) {
   effects.update(dt);
   trafficLights.update(dt);
   traffic.update(dt, getTrafficObstacles(), trafficLights);
+  pedestrians.update(dt);
   weather.update(dt, car.group.position);
   if (roofUfo) roofUfo.update(dt);
   if (activeFlyoverUfo) {
@@ -1811,7 +1904,7 @@ function loop(now) {
 
   const speedKmh = car.getSpeedKmh();
   audio.updateEngine(car.chassisBody.velocity.length(), Math.abs(input.throttle));
-  updateSkidFx(dt, speedKmh);
+  updateSkidFx(dt, speedKmh, input.throttle);
   drawMinimap();
   drawCompass();
   if (phoneOpen && phoneTab === 'map') drawPhoneMap();
