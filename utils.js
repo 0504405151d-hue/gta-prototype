@@ -64,6 +64,31 @@ export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', 
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, w, h);
 
+  // Round 12 ("...после поломки вылетают какие-то черные квадраты"): this
+  // turned out to be a second, unrelated bug on top of the skid-mark one
+  // fixed earlier the same round. Buildings only ever had a plain DIFFUSE
+  // window texture — a MeshStandardMaterial's color is base-color times
+  // however much light actually reaches that surface, so a building
+  // sitting in another building's shadow (or just too far from the nearest
+  // streetlight) could render as a flat, textureless black silhouette,
+  // "lit" windows and all — the yellow window rectangles were still right
+  // there in the texture, they just had no light left to reflect. A real
+  // lit window glows from an interior light instead of reflecting the sun,
+  // so a second, otherwise-identical canvas is built alongside the first —
+  // solid black except the exact same lit-window rectangles — and handed
+  // back as an emissive map, so those windows read as lit no matter how
+  // dark the building's own side of the street is. This is also exactly
+  // what a car tumbling from an explosion exposed: the follow-camera swings
+  // through angles normal driving never points it at, catching shadowed
+  // buildings that always rendered this way but were never actually on
+  // screen before.
+  const emCanvas = document.createElement('canvas');
+  emCanvas.width = w;
+  emCanvas.height = h;
+  const emCtx = emCanvas.getContext('2d');
+  emCtx.fillStyle = '#000000';
+  emCtx.fillRect(0, 0, w, h);
+
   // Subtle vertical panel-seam lines break up the flat base color before
   // windows go down, so facades read as built from panels rather than a
   // single painted slab.
@@ -96,6 +121,10 @@ export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', 
       if (litUp) {
         ctx.fillStyle = 'rgba(255,255,255,0.18)';
         ctx.fillRect(wx, wy, ww, wh * 0.25);
+        // Same rectangle, same spot, on the emissive map — this is the part
+        // that keeps this window glowing however dark the wall around it is.
+        emCtx.fillStyle = lit;
+        emCtx.fillRect(wx, wy, ww, wh);
       }
     }
   }
@@ -114,6 +143,18 @@ export function buildFacadeTexture(THREE, { w = 256, h = 512, base = '#2b2f3a', 
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = _anisotropy; // keeps facades from turning into a mushy blur at grazing/distant view angles
+
+  const emissiveMap = new THREE.CanvasTexture(emCanvas);
+  emissiveMap.wrapS = THREE.RepeatWrapping;
+  emissiveMap.wrapT = THREE.RepeatWrapping;
+  emissiveMap.colorSpace = THREE.SRGBColorSpace;
+  emissiveMap.anisotropy = _anisotropy;
+  // Carried as a property on the diffuse texture (rather than changing this
+  // function's return shape) so every existing caller — which only ever
+  // expected one texture back, and calls tex.repeat.set(...) on it — keeps
+  // working untouched; city.js just also copies .repeat onto tex.emissiveMap
+  // and wires it into the material as an emissiveMap.
+  tex.emissiveMap = emissiveMap;
   return tex;
 }
 

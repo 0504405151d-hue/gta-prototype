@@ -30,7 +30,7 @@ import { spawnRoofUfo, spawnFlyoverUfo } from './easterEggs.js';
 // people can actually SEE whether they're both on the same deployed build
 // instead of guessing from symptoms like "your car looks different to me".
 // Bump this string whenever a round of changes ships.
-export const GAME_VERSION = 'r9 · 2026-09-08';
+export const GAME_VERSION = 'r11 · 2026-09-09';
 const versionTagEl = document.getElementById('versionTag');
 if (versionTagEl) versionTagEl.textContent = `City Drive ${GAME_VERSION}`;
 
@@ -58,6 +58,13 @@ let gtao = null;
 // runs once at boot before the composer/SMAAPass below exist, so this needs
 // to be declared (and no-op-guarded) up here too.
 let smaa = null;
+
+// Round 13 ("тени и освещение ночью" — машины): same temporal-dead-zone
+// reasoning again — applyGraphicsSettings() (via applyHeadlightShadow()
+// below it) needs to reach the player's car to toggle headlight shadow
+// casting, but the very first call happens at boot, long before the
+// Vehicle itself is built further down.
+let car = null;
 
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
@@ -196,6 +203,27 @@ function applyGraphicsSettings(level) {
   // it at a resolution/framerate that can't really show it off anyway.
   if (gtao) gtao.enabled = level === 'high' || level === 'ultra';
   if (smaa) smaa.enabled = level !== 'low';
+  // Round 13 ("тени и освещение ночью" — машины): the player's own headlight
+  // SpotLight (see vehicle.js) could always light the road but never cast a
+  // shadow — poles, pedestrians and other cars the headlights swept over
+  // just stayed uniformly lit instead of throwing a shadow ahead the way a
+  // real headlight does at night. It's ONE extra shadow-casting light for
+  // ONLY the local player's own car (traffic/remote cars don't get real
+  // SpotLights at all — see vehicle.js), so the cost is nowhere near the
+  // GTAO pass above; still gated off "low"/"medium" alongside soft shadows
+  // since it's still an extra shadow map render every frame.
+  //
+  // `car` doesn't exist yet the very first time this runs (called once at
+  // boot before the player's Vehicle is built — same temporal-dead-zone
+  // situation as gtao/smaa above), so this can't just reach for `car`
+  // directly here; applyHeadlightShadow() below is called instead, right
+  // after every place `car` gets (re)assigned, and again whenever the
+  // graphics level actually changes at runtime.
+  applyHeadlightShadow(level);
+}
+
+function applyHeadlightShadow(level) {
+  if (car && car.headBeam) car.headBeam.castShadow = level === 'high' || level === 'ultra';
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +394,8 @@ function buildVehicleAt(spawnPoint, carId) {
   });
 }
 const spawn = choice(city.spawnPoints);
-let car = buildVehicleAt(spawn, selectedCarId);
+car = buildVehicleAt(spawn, selectedCarId);
+applyHeadlightShadow(settings.graphics);
 
 // Headlights default to on at night, off otherwise — H always lets the
 // player override either way (see readInput()'s keydown handling below).
@@ -742,6 +771,7 @@ document.getElementById('applyCarBtn').addEventListener('click', () => {
   car.dispose(scene);
   car = buildVehicleAt(s, newId);
   car.setHeadlightsOn(headlightsOn);
+  applyHeadlightShadow(settings.graphics);
   applyAdminStateToCar();
   net.setCar(newId);
   setPhone(false);
@@ -1574,6 +1604,7 @@ document.getElementById('startBtn').addEventListener('click', () => {
     car.dispose(scene);
     car = buildVehicleAt(spawn, selectedCarId);
     car.setHeadlightsOn(headlightsOn);
+    applyHeadlightShadow(settings.graphics);
     applyAdminStateToCar();
     // Pre-compile every material/shader in the scene right here, still
     // under the loading screen — this is what actually eats the several

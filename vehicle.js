@@ -445,6 +445,17 @@ export class Vehicle {
     const headBeam = new THREE.SpotLight(0xfff2c0, 5, 40, Math.PI / 6, 0.4, 1.4);
     headBeam.position.set(0, 0.45, chassisL / 2 + 0.15);
     headBeam.target.position.set(0, 0, chassisL / 2 + 10);
+    // Round 13 ("тени и освещение ночью"): castShadow itself is toggled per
+    // graphics tier from main.js (applyHeadlightShadow) — this only pre-sets
+    // a sane shadow map for when it's on, same idea as the sun's own bias
+    // tuning in city.js: too small a bias and the beam's own cone geometry
+    // shadow-acnes itself, too big and shadows visibly detach from their
+    // casters, so a small negative bias (same sign/order as the sun's) is
+    // set up front here rather than left at the (acne-prone) default.
+    headBeam.shadow.mapSize.set(512, 512);
+    headBeam.shadow.bias = -0.002;
+    headBeam.shadow.camera.near = 0.5;
+    headBeam.shadow.camera.far = 40;
     group.add(headBeam, headBeam.target);
     this.headBeam = headBeam;
     this._headlightsOn = true;
@@ -796,6 +807,17 @@ export class Vehicle {
     const headBeam = new THREE.SpotLight(0xfff2c0, 5, 40, Math.PI / 6, 0.4, 1.4);
     headBeam.position.set(0, 0.45, chassisL / 2 + 0.15);
     headBeam.target.position.set(0, 0, chassisL / 2 + 10);
+    // Round 13 ("тени и освещение ночью"): castShadow itself is toggled per
+    // graphics tier from main.js (applyHeadlightShadow) — this only pre-sets
+    // a sane shadow map for when it's on, same idea as the sun's own bias
+    // tuning in city.js: too small a bias and the beam's own cone geometry
+    // shadow-acnes itself, too big and shadows visibly detach from their
+    // casters, so a small negative bias (same sign/order as the sun's) is
+    // set up front here rather than left at the (acne-prone) default.
+    headBeam.shadow.mapSize.set(512, 512);
+    headBeam.shadow.bias = -0.002;
+    headBeam.shadow.camera.near = 0.5;
+    headBeam.shadow.camera.far = 40;
     group.add(headBeam, headBeam.target);
     this.headBeam = headBeam;
     this._headlightsOn = true;

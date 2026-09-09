@@ -245,6 +245,7 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
         // column from ~1 unit wide/0.43 tall to ~1.8 wide/3 tall, close to a
         // real window+floor-height instead of a fine grid of tiny squares.
         tex.repeat.set(Math.max(1, bw / 9), Math.max(1, bh / 30));
+        tex.emissiveMap.repeat.copy(tex.repeat); // keep the glow aligned with the same window grid it's tiled onto
         // Round-6 ("every building looks the same" + a real bug: windows on
         // the roof): three cosmetic "styles" reusing the same facade texture
         // so the palette work above still matters, plus a plain roof cap
@@ -254,14 +255,22 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
         // under the AC units. A material ARRAY (one per box face, order
         // px/nx/py/ny/pz/nz) puts the facade texture on the four vertical
         // sides only and a flat, unlit-looking cap on top/bottom.
+        //
+        // Round 12 ("черные квадраты" bugfix — see buildFacadeTexture()):
+        // emissive/emissiveMap make the lit-window rectangles glow on their
+        // own instead of only reflecting whatever light happens to reach
+        // this wall, so a building in full shadow never goes fully black.
+        // emissiveIntensity is deliberately modest — enough to keep windows
+        // readable in shadow/at night, not enough to blow them out and look
+        // like they're glowing in broad daylight.
         const style = choice(['concrete', 'concrete', 'glass', 'brick']);
         let sideMat;
         if (style === 'glass') {
-          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.28, metalness: 0.55, color: 0xcfe0ff });
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.28, metalness: 0.55, color: 0xcfe0ff, emissive: 0xffffff, emissiveMap: tex.emissiveMap, emissiveIntensity: 0.7 });
         } else if (style === 'brick') {
-          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.02, color: 0xffdcc0 });
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.02, color: 0xffdcc0, emissive: 0xffffff, emissiveMap: tex.emissiveMap, emissiveIntensity: 0.7 });
         } else {
-          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15 });
+          sideMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0.15, emissive: 0xffffff, emissiveMap: tex.emissiveMap, emissiveIntensity: 0.7 });
         }
         const roofCapMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.9, metalness: 0.05 });
 
@@ -293,7 +302,8 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
           const topH = rand(6, 16);
           const topTex = buildFacadeTexture(THREE, { base: `#${hue.toString(16)}` });
           topTex.repeat.set(Math.max(1, topW / 9), Math.max(1, topH / 30));
-          const topSideMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: sideMat.roughness, metalness: sideMat.metalness, color: sideMat.color.getHex() });
+          topTex.emissiveMap.repeat.copy(topTex.repeat);
+          const topSideMat = new THREE.MeshStandardMaterial({ map: topTex, roughness: sideMat.roughness, metalness: sideMat.metalness, color: sideMat.color.getHex(), emissive: 0xffffff, emissiveMap: topTex.emissiveMap, emissiveIntensity: 0.7 });
           const top = new THREE.Mesh(
             new THREE.BoxGeometry(topW, topH, topD),
             [topSideMat, topSideMat, roofCapMat, roofCapMat, topSideMat, topSideMat]
@@ -435,12 +445,80 @@ export function buildCity(THREE, CANNON, world, scene, { shadowMapSize = 2048 } 
     propSpots.push({ x: rand(-CITY_HALF * 0.6, CITY_HALF * 0.6), z: rand(-CITY_HALF * 0.6, CITY_HALF * 0.6) });
   }
 
+  const puddles = buildPuddles(THREE, streetCoords);
+  group.add(puddles);
+
   return {
     group, spawnPoints, propSpots, cityHalf: CITY_HALF, sun, buildingBodies, footprints, streetCoords,
-    hemi, skyMat, groundMat, starsMat: starMat,
+    hemi, skyMat, groundMat, starsMat: starMat, puddles,
   };
 }
 // (helpers kept below)
+
+// Round 13 ("вода, лужи, дождь"): scattered, road-shaped puddle decals —
+// previously "wet weather" only meant the WHOLE road surface uniformly got
+// glossier (see weather.js's roadRough/roadEnv), which reads as "the road
+// is shiny" rather than "there's standing water in spots", the way real
+// rain actually pools unevenly along a street. These are built once, at
+// full transparency (invisible), as part of the static city — WeatherSystem
+// just fades their shared material's opacity in/out with the same
+// transition it already runs for road wetness (see weather.js), so a dry
+// city never shows a floating puddle mesh.
+//
+// One InstancedMesh (a single draw call) scattered probabilistically along
+// actual road segments read straight from streetCoords — the exact same
+// node grid traffic.js drives between — with a lateral jitter kept inside
+// ROAD_HALF_WIDTH so puddles never drift onto a sidewalk.
+function buildPuddles(THREE, streetCoords) {
+  const tex = buildSoftDotTexture(THREE); // reused for a soft round alpha edge instead of a hard-edged disc
+  const geo = new THREE.CircleGeometry(1, 20);
+  const mat = new THREE.MeshStandardMaterial({
+    map: tex, color: 0x060a10, roughness: 0.05, metalness: 0.15,
+    transparent: true, opacity: 0, depthWrite: false, envMapIntensity: 2.6,
+  });
+
+  const n = streetCoords.length;
+  const segments = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n - 1; j++) {
+      // horizontal segment: runs along X at fixed Z = streetCoords[i]
+      segments.push({ x0: streetCoords[j], z0: streetCoords[i], x1: streetCoords[j + 1], z1: streetCoords[i], horiz: true });
+      // vertical segment: runs along Z at fixed X = streetCoords[i]
+      segments.push({ x0: streetCoords[i], z0: streetCoords[j], x1: streetCoords[i], z1: streetCoords[j + 1], horiz: false });
+    }
+  }
+  const chosen = segments.filter(() => Math.random() < 0.2);
+  const count = Math.max(1, chosen.length);
+  const mesh = new THREE.InstancedMesh(geo, mat, count);
+  const dummy = new THREE.Object3D();
+  let idx = 0;
+  for (const seg of chosen) {
+    const t = rand(0.15, 0.85);
+    const cx = seg.x0 + (seg.x1 - seg.x0) * t;
+    const cz = seg.z0 + (seg.z1 - seg.z0) * t;
+    const lateralMax = ROAD_HALF_WIDTH - 1.4;
+    const lateral = rand(-lateralMax, lateralMax);
+    dummy.position.set(seg.horiz ? cx : cx + lateral, 0.025, seg.horiz ? cz + lateral : cz);
+    dummy.rotation.x = -Math.PI / 2;
+    dummy.scale.setScalar(rand(1.3, 2.6));
+    dummy.updateMatrix();
+    mesh.setMatrixAt(idx++, dummy.matrix);
+  }
+  // Leftover pre-allocated instance slots (count was rounded up to at least
+  // 1) — park any unused ones far below the map instead of leaving them at
+  // the identity matrix sitting visibly at the world origin.
+  for (; idx < count; idx++) {
+    dummy.position.set(0, -500, 0);
+    dummy.rotation.x = -Math.PI / 2;
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(idx, dummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false; // scattered across the whole city, same reasoning as the rain volume in weather.js
+  mesh.receiveShadow = true;
+  return mesh;
+}
 
 // Round 7 ("каждый дом в другом месте другой формы" — irregular city
 // blocks): recursive binary-space-partition of a square block footprint
@@ -871,4 +949,25 @@ function addStreetlight(THREE, CANNON, world, group, x, z, armAngleRad = 0) {
   const light = new THREE.PointLight(0xffb066, 6, 16, 2);
   light.position.copy(lamp.position);
   armPivot.add(light);
+
+  // Round 13 ("тени и освещение ночью"): the lamp itself and its PointLight
+  // already lit the road correctly, but a real streetlight also leaves a
+  // visible warm POOL of light pooled on the ground under it — without one,
+  // the point light's glow reads as "this pole is bright" rather than "this
+  // patch of street is lit", which is most of what actually sells a night
+  // street scene. A flat, additive-blended soft-dot decal laid right on the
+  // asphalt is the classic cheap trick for this: one draw call, no shadow
+  // interaction, and it's positioned from the SAME arm-pivot trig used for
+  // the point light above so it always lands exactly under the real lamp
+  // regardless of which corner/side the pole sits on or which way its arm
+  // faces the road.
+  const poolTex = buildSoftDotTexture(THREE);
+  const poolMat = new THREE.MeshBasicMaterial({
+    map: poolTex, color: 0xffb066, transparent: true, opacity: 0.4,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const pool = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 6.5), poolMat);
+  pool.rotation.x = -Math.PI / 2;
+  pool.position.set(x + armLen * Math.cos(armAngleRad), 0.03, z - armLen * Math.sin(armAngleRad));
+  group.add(pool);
 }

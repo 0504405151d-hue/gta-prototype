@@ -121,6 +121,12 @@ export class WeatherSystem {
     this.roadMat = roadMat;
     this.audio = audio;
     this.dayNight = dayNight;
+    // Round 13 ("вода, лужи, дождь"): the puddle decals city.js scatters
+    // along the roads (see buildPuddles()) start fully invisible — this
+    // just grabs their shared material so its opacity can fade in/out with
+    // the exact same transition machinery already driving roadRough/roadEnv
+    // below, rather than adding a second, parallel fade system.
+    this.puddleMat = city.puddles ? city.puddles.material : null;
 
     this.base = {
       sunI: this.sun.intensity,
@@ -133,6 +139,7 @@ export class WeatherSystem {
       fogColor: scene.fog.color.clone(),
       roadRough: roadMat.roughness,
       roadEnv: roadMat.envMapIntensity ?? 1,
+      puddleOpacity: this.puddleMat ? this.puddleMat.opacity : 0,
     };
     this.skyTargets = {
       clear: { top: this.base.top.clone(), bottom: this.base.bottom.clone() },
@@ -183,6 +190,7 @@ export class WeatherSystem {
       bottom: sky.bottom,
       roadRough: p.wet ? Math.max(0.12, this.base.roadRough * 0.3) : this.base.roadRough,
       roadEnv: p.wet ? 1.7 : this.base.roadEnv,
+      puddleOpacity: p.wet ? 0.75 : 0,
       rain: p.rain,
     };
   }
@@ -198,6 +206,7 @@ export class WeatherSystem {
     this.skyMat.uniforms.bottomColor.value.copy(v.bottom);
     this.roadMat.roughness = v.roadRough;
     this.roadMat.envMapIntensity = v.roadEnv;
+    if (this.puddleMat) this.puddleMat.opacity = v.puddleOpacity;
   }
 
   /** `instant`: skip the fade (used for the very first call, at construction,
@@ -216,6 +225,7 @@ export class WeatherSystem {
       bottom: this.skyMat.uniforms.bottomColor.value.clone(),
       roadRough: this.roadMat.roughness,
       roadEnv: this.roadMat.envMapIntensity ?? 1,
+      puddleOpacity: this.puddleMat ? this.puddleMat.opacity : 0,
     };
     this._to = target;
     this._t = instant ? 1 : 0;
@@ -257,6 +267,7 @@ export class WeatherSystem {
       this.skyMat.uniforms.bottomColor.value.copy(this._from.bottom).lerp(this._to.bottom, s);
       this.roadMat.roughness = lerp(this._from.roadRough, this._to.roadRough);
       this.roadMat.envMapIntensity = lerp(this._from.roadEnv, this._to.roadEnv);
+      if (this.puddleMat) this.puddleMat.opacity = lerp(this._from.puddleOpacity, this._to.puddleOpacity);
       if (this._t >= 1 && this._rainFadeOut) this.rain.mesh.visible = false;
     } else if (this.dayNight) {
       // No weather-preset transition in flight, but the day/night base is
